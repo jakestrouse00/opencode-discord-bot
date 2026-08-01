@@ -7,10 +7,17 @@ so reattaching is just restoring the id mapping).
 
 The persisted file (`bot/.sessions.json` by default) is gitignored — see
 `bot/.gitignore`. It contains only session ids, no secrets.
+
+The file write happens on the bot's event loop, so `bind`/`reset`/`save`
+are async and offload the disk write to a thread via `asyncio.to_thread` —
+a synchronous `Path.write_text` would block the loop on every new session
+binding (disk fsync is 1–10ms+ on Windows, and it's on the hot path of every
+`/oc` invocation).
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -24,15 +31,16 @@ _DEFAULT_PATH = Path(".opencode-discord-bot-sessions.json")
 class SessionRouter:
     """Channel id (int) -> opencode session id (str), persisted to JSON.
 
-    `current` and `reset` are sync (pure local-map ops); `get_or_create` is
-    async because it calls the async `OpencodeClient.create_session` on a
-    cache miss. Callers run it from within the bot's event loop (slash-command
-    handlers are async).
+    `current` is sync (pure local-map lookup); `bind`, `reset`, `get_or_create`,
+    and `save` are async because they write to disk off the event loop. Callers
+    run them from within the bot's event loop (slash-command handlers are
+    async).
     """
 
     def __init__(self, persist_path: Path = _DEFAULT_PATH) -> None:
         self._path = persist_path
         self._map: dict[str, str] = {}
+        self._dir_ensured = False
         self._load()
 
     def _load(self) -> None:
@@ -46,11 +54,20 @@ class SessionRouter:
         else:
             self._map = {}
 
-    def save(self) -> None:
-        """Write the current map to disk (best-effort, never raises)."""
+    async def save(self) -> None:
+        """Write the current map to disk (best-effort, never raises).
+
+        The full-file JSON rewrite runs in a worker thread so the event loop
+        isn't blocked on disk I/O (the parent dir is created once and cached).
+        """
         try:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            self._path.write_text(json.dumps(self._map, indent=2), encoding="utf-8")
+            if not self._dir_ensured:
+                await asyncio.to_thread(
+                    self._path.parent.mkdir, parents=True, exist_ok=True
+                )
+                self._dir_ensured = True
+            payload = json.dumps(self._map, indent=2)
+            await asyncio.to_thread(self._path.write_text, payload, "utf-8")
         except OSError:
             pass
 
@@ -77,10 +94,10 @@ class SessionRouter:
         session = await client.create_session(session_title)
         sid = session["id"]
         self._map[key] = sid
-        self.save()
+        await self.save()
         return sid
 
-    def reset(self, channel_id: int) -> None:
+    async def reset(self, channel_id: int) -> None:
         """Drop the channel->session binding (does NOT delete the opencode session).
 
         Next `get_or_create` makes a fresh session. Use after `oc_new` or when
@@ -88,9 +105,9 @@ class SessionRouter:
         history (which remains on the server until explicitly deleted).
         """
         self._map.pop(str(channel_id), None)
-        self.save()
+        await self.save()
 
-    def bind(self, channel_id: int, session_id: str) -> None:
+    async def bind(self, channel_id: int, session_id: str) -> None:
         """Bind a channel to an already-created opencode session id, persisted.
 
         Unlike `get_or_create`, this does NOT create an opencode session — the
@@ -100,4 +117,4 @@ class SessionRouter:
         for it.
         """
         self._map[str(channel_id)] = session_id
-        self.save()
+        await self.save()

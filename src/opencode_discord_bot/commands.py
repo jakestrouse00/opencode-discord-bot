@@ -42,7 +42,7 @@ from opencode_discord_bot.events import SessionStatus, poll_until_idle
 from opencode_discord_bot.opencode_client import OpencodeClient, OpencodeError
 from opencode_discord_bot.questions import poll_pending_requests
 from opencode_discord_bot.session_router import SessionRouter
-from opencode_discord_bot.slug import generate_slug
+from opencode_discord_bot.slug import aclose_slug_client, generate_slug
 from opencode_discord_bot.voice import (
     VoiceSession,
     extract_audio_to_wav,
@@ -164,6 +164,14 @@ class OpencodeBot(discord.Bot):
     decorator-based (`@bot.slash_command` + `discord.Option`) rather than
     `app_commands.CommandTree`; this class migrated from the tree model to
     the decorator model when the dep switched from discord.py to Pycord.
+
+    `auto_sync_commands=False` (set in `__init__`) disables Pycord's startup
+    auto-sync so the bot doesn't push a *global* copy of every slash command
+    on every login (which, combined with the guild-scoped commands pushed by
+    `sync_commands.py`, produced duplicate entries in the Discord UI). Slash
+    commands are synced explicitly via
+    `python -m opencode_discord_bot.sync_commands --guild <id>` after the
+    command surface changes.
     """
 
     def __init__(self) -> None:
@@ -177,7 +185,16 @@ class OpencodeBot(discord.Bot):
         intents = discord.Intents.default()
         intents.message_content = True
         intents.voice_states = True
-        super().__init__(intents=intents)
+        # `auto_sync_commands=False` disables Pycord's `on_connect` auto-sync
+        # (BotBase.on_connect does `if self.auto_sync_commands: await
+        # self.sync_commands()`), which was pushing a *global* copy of every
+        # slash command on every startup. Combined with the guild-scoped
+        # commands pushed by `sync_commands.py`, Discord's UI rendered both
+        # sets → duplicate entries. Slash commands are now synced explicitly
+        # via `python -m opencode_discord_bot.sync_commands --guild <id>`
+        # (one-off, after command surface changes); the bot no longer touches
+        # Discord's command registry on startup. See `on_connect` below.
+        super().__init__(intents=intents, auto_sync_commands=False)
         self.client = OpencodeClient()
         self.router = SessionRouter()
         self._serve = OpencodeServe(cwd=str(_REPO_ROOT))
@@ -251,7 +268,7 @@ class OpencodeBot(discord.Bot):
             if not self._channel_ok(ctx.channel_id):
                 await _deny(ctx)
                 return
-            self.router.reset(ctx.channel_id)
+            await self.router.reset(ctx.channel_id)
             await ctx.respond(
                 f"Session binding reset for channel {ctx.channel_id}. "
                 "Plain-text messages here will no longer be forwarded. "
@@ -416,7 +433,12 @@ class OpencodeBot(discord.Bot):
                 "as /oc_plan but voice-in, no live channel join). For video files, the "
                 "audio track is extracted via ffmpeg and only the audio is transcribed. "
                 "`plan_type`: 'Planned update' or 'Note to self' (optional). Accepts "
-                "mp3, wav, m4a, ogg, opus, webm, flac, mov, mp4, avi, mkv up to 24MB.\n"
+                "mp3, wav, m4a, ogg, opus, webm, flac, mov, mp4, avi, mkv.\n"
+                "**Voice messages:** send a Discord voice message (press-hold the mic in "
+                "the mobile composer) in a session channel to transcribe it as a "
+                "follow-up, or in the #new-plans trigger channel to start a new "
+                "plan-author session. Same pipeline as /oc_talk, no slash command "
+                "needed.\n"
                 "/oc_new — unbind this channel's session (stop forwarding plain-text here).\n"
                 "/oc_session — show this channel's current session + status.\n"
                 "/oc_sessions — list recent opencode sessions.\n"
@@ -429,16 +451,21 @@ class OpencodeBot(discord.Bot):
             await ctx.respond(text)
 
     async def on_connect(self) -> None:
-        """Auto-sync slash commands (via super), then start `opencode serve`.
+        """Start `opencode serve` after the gateway connects.
 
         Replaces the old discord.py `setup_hook` (which Pycord does not call).
         `on_connect` fires after the gateway connection is established and before
-        READY; `BotBase.on_connect` auto-syncs commands when
-        `auto_sync_commands=True` (the default), so the manual `tree.sync` block
-        is gone. The serve subprocess is started here (not in __init__) so the
-        spawn + health-check waits run on the bot's asyncio loop. If the server
-        can't start (opencode not installed, port taken, timeout), the bot still
-        logs in — subsequent `/oc` calls will fail with a clear OpencodeError.
+        READY. Pycord's `BotBase.on_connect` only does
+        `if self.auto_sync_commands: await self.sync_commands()` — since
+        `auto_sync_commands=False` is set in `__init__`, there's nothing to
+        delegate, so we intentionally do NOT call `super().on_connect()` (it
+        would be a no-op anyway, but skipping it keeps the intent explicit).
+        Slash commands are synced via the standalone `sync_commands.py` script,
+        not on every startup. The serve subprocess is started here (not in
+        __init__) so the spawn + health-check waits run on the bot's asyncio
+        loop. If the server can't start (opencode not installed, port taken,
+        timeout), the bot still logs in — subsequent `/oc` calls will fail
+        with a clear OpencodeError.
 
         `on_connect` can fire multiple times on reconnect, so `_serve_started`
         guards against spawning a second subprocess.
@@ -448,7 +475,10 @@ class OpencodeBot(discord.Bot):
         basic-auth on every request (the client reads the env var at request
         time, not import time, so setting it here is sufficient).
         """
-        await super().on_connect()  # auto-syncs commands (auto_sync_commands=True)
+        # No `await super().on_connect()` here — `auto_sync_commands=False`
+        # (set in __init__) makes it a no-op, and skipping it documents that
+        # the bot does NOT push commands on startup. Sync via
+        # `python -m opencode_discord_bot.sync_commands` instead.
         if self._serve_started:
             return
         self._serve_started = True
@@ -484,9 +514,14 @@ class OpencodeBot(discord.Bot):
                 _log.warning("voice disconnect raised during close", exc_info=True)
         self._voice_sessions.clear()
         try:
-            self._serve.stop()
+            # `stop()` does blocking subprocess.run + proc.wait (up to ~8s on
+            # Windows tree-kill). Offload it so the event loop keeps draining
+            # pending voice disconnects / replies during shutdown.
+            await asyncio.to_thread(self._serve.stop)
         except Exception:  # noqa: BLE001 — teardown must not raise
             _log.warning("opencode serve stop raised during close", exc_info=True)
+        # Release the shared slug httpx.AsyncClient (best-effort).
+        await aclose_slug_client()
         await super().close()
 
     def _channel_ok(self, channel_id: int | None) -> bool:
@@ -503,6 +538,28 @@ class OpencodeBot(discord.Bot):
         if self.router.current(channel_id) is not None:
             return True
         return _channel_allowed(channel_id)
+
+    def _voice_attachment(self, message: discord.Message) -> discord.Attachment | None:
+        """Return the first transcribable attachment on `message`, else None.
+
+        Centralizes "is this a voice message?" detection so `on_message` can
+        branch cleanly and the download path has a single attachment handle
+        to `.read()`. Reuses `is_transcribable_attachment` from `voice.py`
+        (already imported above) so the accepted-types list (`audio/*`,
+        `video/*`, `application/ogg`, plus extension fallbacks) stays in one
+        place. Discord voice messages arrive as `audio/ogg` /
+        `application/ogg` attachments with usually-empty `content`.
+        """
+        for att in message.attachments:
+            try:
+                if is_transcribable_attachment(att):
+                    return att
+            except Exception:  # noqa: BLE001 — defensive: bad attachment metadata
+                _log.warning(
+                    "is_transcribable_attachment raised on %r; skipping",
+                    getattr(att, "filename", "?"),
+                )
+        return None
 
     async def _rename_when_slug_ready(
         self,
@@ -552,7 +609,7 @@ class OpencodeBot(discord.Bot):
         send_chunk: Callable[[str], Awaitable[Any]],
         progress_msg: discord.Message,
         voice_session: VoiceSession | None = None,
-    ) -> None:
+    ) -> str | None:
         """Shared poll/progress/reply body for `/oc` and plain-text follow-ups.
 
         Marks `sid` busy (so `on_message` rejects concurrent follow-ups for the
@@ -569,6 +626,11 @@ class OpencodeBot(discord.Bot):
         `voice_session`, when set, routes pending question requests through
         the voice channel (TTS speaks the question, STT captures the answer)
         instead of Discord buttons. See `poll_pending_requests`.
+
+        Returns the final assistant text that was posted to `send_chunk`, or
+        None if the session produced no text or the message fetch failed. The
+        voice-finalize path uses this to drive TTS without re-fetching the
+        message list (the fetch inside this method already did that work).
         """
         self._active_drives[sid] = asyncio.current_task()  # type: ignore[assignment]
         # The request poller surfaces pending question/permission requests
@@ -628,14 +690,15 @@ class OpencodeBot(discord.Bot):
                 messages = await self.client.list_messages(sid)
             except OpencodeError as e:
                 await send_chunk(f"Failed to fetch final messages: {e}")
-                return
+                return None
             final_text = _final_assistant_text(messages)
             if not final_text:
                 await send_chunk(f"Done (no text output). Session `{sid}` is now idle.")
-                return
+                return None
             prefix = f"**opencode** (session `{sid}`):\n"
             for chunk in _split_message(prefix + final_text):
                 await send_chunk(chunk)
+            return final_text
         finally:
             stop_event.set()
             try:
@@ -733,7 +796,7 @@ class OpencodeBot(discord.Bot):
         # Bind the new channel to the session BEFORE sending any message, so
         # a user message arriving in the channel before the prompt completes
         # still resolves to the right session (and gets the busy reply).
-        self.router.bind(new_channel.id, sid)
+        await self.router.bind(new_channel.id, sid)
 
         parts = [{"type": "text", "text": prompt}]
         try:
@@ -763,25 +826,73 @@ class OpencodeBot(discord.Bot):
         )
 
     async def on_message(self, message: discord.Message) -> None:
-        """Forward plain-text messages in session channels as follow-up prompts.
+        """Forward plain-text messages in session channels as follow-up prompts,
+        and detect Discord voice messages (press-hold mic in the mobile
+        composer) for transcription + routing.
 
-        Only messages in channels the bot created (i.e. channels with a bound
-        opencode session per `SessionRouter`) are forwarded; all other
-        channels are ignored. Ignores bot-authored and empty messages. If the
-        bound session is already busy driving another prompt, replies with a
-        "please wait" notice and drops the new message.
+        Four branches (checked in order):
+
+        (a) Session channel + voice attachment: transcribe and send the
+            transcript as a follow-up prompt to the bound session
+            (``_run_voice_followup``).
+        (b) Session channel + no voice attachment: the existing plain-text
+            follow-up path. Empty ``content`` is ignored (preserves the old
+            silent-drop for non-voice empty messages). Non-empty content is
+            forwarded via ``_run_followup``.
+        (c) Non-session channel + voice attachment + the channel is the
+            configured voice-message trigger channel
+            (``config.voice_message_trigger_channel_id``): start a new
+            plan-author session from the transcript (``_run_talk_from_message``).
+            The trigger channel is #new-plans (id 1533242090862149842) by
+            default; 0 disables the new-session path.
+        (d) Else: ignored (non-session, non-voice — the same behavior as
+            before this feature).
+
+        Voice messages are regular ``discord.Message`` objects with an
+        ``audio/ogg`` / ``application/ogg`` attachment and usually empty
+        ``content``. The old guard ``if not message.content: return`` silently
+        dropped them; the rewrite keeps bot-authored messages out, then
+        routes on the (sid, voice_att) tuple. ``voice_message_enabled``
+        (config, default True) gates both voice paths so the feature can be
+        disabled without a code change.
         """
-        if message.author.bot or not message.content:
+        if message.author.bot:
             return
         sid = self.router.current(message.channel.id)
-        if sid is None:
-            return  # not a bot-managed session channel
-        if sid in self._active_drives:
-            await message.channel.send(
-                "Session is busy, please wait for the current response to finish."
-            )
+        voice_att = (
+            self._voice_attachment(message) if config.voice_message_enabled else None
+        )
+        # (a) Voice follow-up in an existing session channel.
+        if sid is not None and voice_att is not None:
+            if sid in self._active_drives:
+                await message.channel.send(
+                    "Session is busy, please wait for the current response to finish."
+                )
+                return
+            await self._run_voice_followup(message, sid, voice_att)
             return
-        await self._run_followup(message, sid)
+        # (b) Text follow-up in an existing session channel (existing path).
+        if sid is not None and voice_att is None:
+            if not message.content:
+                return
+            if sid in self._active_drives:
+                await message.channel.send(
+                    "Session is busy, please wait for the current response to finish."
+                )
+                return
+            await self._run_followup(message, sid)
+            return
+        # (c) Voice message in the configured trigger channel -> new session.
+        if (
+            sid is None
+            and voice_att is not None
+            and config.voice_message_trigger_channel_id
+            and message.channel.id == config.voice_message_trigger_channel_id
+        ):
+            await self._run_talk_from_message(message, voice_att)
+            return
+        # (d) Non-session, non-voice (or trigger channel not configured) — ignored.
+        return
 
     async def _fetch_last_user_message_id(
         self, sid: str, *, seen_before: str | None = None, attempts: int = 3
@@ -860,6 +971,91 @@ class OpencodeBot(discord.Bot):
                 message.id
             ] = new_user_id
 
+        progress_msg = await message.channel.send(f"Working on session `{sid}`…")
+        await self._drive_session(
+            sid,
+            send_chunk=message.channel.send,
+            progress_msg=progress_msg,
+            voice_session=None,
+        )
+
+    async def _run_voice_followup(
+        self,
+        message: discord.Message,
+        sid: str,
+        attachment: discord.Attachment,
+    ) -> None:
+        """Transcribe a voice-message attachment and send it as a follow-up prompt
+        to an existing session (the voice-in analog of `_run_followup`).
+
+        Same session, same drive loop, same edit-to-revert mapping, but the
+        prompt text comes from Whisper instead of ``message.content``. Routed
+        to the session's existing agent (no ``agent=`` override — follow-ups
+        stay on whatever agent the session was started with, matching
+        ``_run_followup``).
+
+        Flow: post a "Transcribing voice message…" status → download the
+        attachment → normalize to WAV via ``extract_audio_to_wav`` →
+        ``transcribe_audio`` → empty guard (edit the status to a hint and
+        return) → edit the status to show the transcript → send the transcript
+        to the session via ``send_prompt_async`` → record the
+        ``_prompt_msg_map`` entry so edit-to-revert works for voice follow-ups
+        too → drive the session to completion.
+        """
+        status_msg = await message.channel.send("Transcribing voice message…")
+        try:
+            media_bytes = await attachment.read()
+            wav_bytes = await extract_audio_to_wav(
+                media_bytes,
+                content_type=attachment.content_type,
+                filename=attachment.filename,
+            )
+            transcript = await transcribe_audio(wav_bytes)
+        except Exception as e:  # noqa: BLE001 — transcription failures are user-facing
+            _log.warning("voice-message follow-up transcription failed: %r", e)
+            await status_msg.edit(
+                content=f"Failed to transcribe `{attachment.filename}`: {e}. "
+                f"The session is bound to this channel — type your plan as "
+                f"text and it will be forwarded to the same opencode session."
+            )
+            return
+
+        transcript = (transcript or "").strip()
+        if not transcript:
+            await status_msg.edit(
+                content="Transcription came back empty (no speech detected). "
+                "The session is bound to this channel — type your plan as "
+                "text to continue."
+            )
+            return
+
+        # Send the transcript to the session's existing agent (no override).
+        parts = [{"type": "text", "text": transcript}]
+        try:
+            await self.client.send_prompt_async(sid, parts)
+        except OpencodeError as e:
+            await message.channel.send(
+                f"Failed to send voice follow-up to session `{sid}`: {e}"
+            )
+            return
+
+        # Best-effort: map this Discord voice message to the opencode user
+        # message it just created, so a later edit can revert to it. Mirrors
+        # the text follow-up mapping in `_run_followup` (editing a voice
+        # message is rare, but the mapping should be consistent).
+        prev_map = self._prompt_msg_map.get(message.channel.id, {})
+        seen_before = prev_map.get(message.id)
+        new_user_id = await self._fetch_last_user_message_id(
+            sid, seen_before=seen_before
+        )
+        if new_user_id is not None:
+            self._prompt_msg_map.setdefault(message.channel.id, {})[
+                message.id
+            ] = new_user_id
+
+        await status_msg.edit(
+            content=f"**Transcribed prompt:**\n```\n{transcript}\n```"
+        )
         progress_msg = await message.channel.send(f"Working on session `{sid}`…")
         await self._drive_session(
             sid,
@@ -1058,7 +1254,7 @@ class OpencodeBot(discord.Bot):
         except discord.HTTPException as e:
             await ctx.followup.send(f"Failed to create session channel `{slug}`: {e}")
             return
-        self.router.bind(new_channel.id, sid)
+        await self.router.bind(new_channel.id, sid)
 
         # Connect to the voice channel. Pycord's VoiceChannel.connect() returns
         # a discord.voice.VoiceClient with the recording API.
@@ -1161,20 +1357,23 @@ class OpencodeBot(discord.Bot):
 
         await text_channel.send(f"**Transcribed prompt:**\n```\n{cleaned}\n```")
         progress_msg = await text_channel.send(f"Working on session `{sid}`…")
-        await self._drive_session(
+        final_text = await self._drive_session(
             sid,
             send_chunk=text_channel.send,
             progress_msg=progress_msg,
             voice_session=session,
         )
 
-        # TTS playback of the final response (best-effort).
-        if config.voice_tts_enabled and session.voice_client.is_connected():
+        # TTS playback of the final response (best-effort). `_drive_session`
+        # already fetched the message list and extracted the assistant text
+        # for its own reply; reuse that here instead of re-fetching.
+        if (
+            config.voice_tts_enabled
+            and final_text
+            and session.voice_client.is_connected()
+        ):
             try:
-                messages = await self.client.list_messages(sid)
-                final_text = _final_assistant_text(messages)
-                if final_text:
-                    await session.speak(final_text)
+                await session.speak(final_text)
             except Exception as e:  # noqa: BLE001 — TTS is best-effort
                 _log.warning("TTS playback failed: %r", e)
 
@@ -1230,15 +1429,9 @@ class OpencodeBot(discord.Bot):
                 f"webm, flac, mov, mp4, avi, mkv."
             )
             return
-        max_bytes = (
-            24 * 1024 * 1024
-        )  # 24MB cap (Discord allows 25MB; Whisper cloud allows 25MB)
-        if recording.size > max_bytes:
-            await ctx.respond(
-                f"That attachment is {recording.size / 1_000_000:.1f}MB; "
-                f"`/oc_talk` caps at 24MB. Trim or downsample the recording."
-            )
-            return
+        # No bot-side size cap: Discord's own per-server upload limit is the
+        # only gate. Oversized attachments are rejected by Discord at the
+        # slash-command invocation step before the bot sees them.
 
         await ctx.defer()
 
@@ -1270,7 +1463,7 @@ class OpencodeBot(discord.Bot):
         except discord.HTTPException as e:
             await ctx.followup.send(f"Failed to create session channel `{slug}`: {e}")
             return
-        self.router.bind(new_channel.id, sid)
+        await self.router.bind(new_channel.id, sid)
 
         # Post a "transcribing" status message in the new channel AND reply to
         # the slash invoker with the channel pointer BEFORE the transcription
@@ -1357,6 +1550,162 @@ class OpencodeBot(discord.Bot):
             send_chunk=new_channel.send,
             progress_msg=progress_msg,
             voice_session=None,  # no live voice path for /oc_talk
+        )
+
+    async def _run_talk_from_message(
+        self,
+        message: discord.Message,
+        attachment: discord.Attachment,
+    ) -> None:
+        """Transcribe a voice-message attachment posted in the trigger channel
+        and start a new plan-author session (the voice-in analog of
+        ``_run_talk_session``, but triggered by a plain message instead of a
+        slash command).
+
+        Mirrors ``_run_talk_session`` but adapted for a plain-message trigger
+        instead of a slash ``ApplicationContext``: there is no ``ctx.defer()``
+        / ``ctx.followup.send``. The "created #channel" pointer is posted into
+        the trigger channel (``message.channel``) via ``message.channel.send``;
+        the status/progress messages go into the new session channel via
+        ``new_channel.send``. No ``plan_type`` directive is sent (a plain
+        message has no slash-option UI), so the plan-author agent classifies
+        the transcript on its own.
+
+        Flow: resolve guild → create opencode session → ``_slugify_prompt``
+        → resolve category → create text channel + ``router.bind`` → post
+        pointer into the trigger channel → post "Transcribing…" status in the
+        new channel → download + ``extract_audio_to_wav`` + ``transcribe_audio``
+        (try/except edits the status on failure) → empty-transcript guard →
+        fire-and-forget LLM slug rename → send transcript to plan-author →
+        edit status to show transcript → drive the session.
+        """
+        guild = message.guild
+        if guild is None:
+            # DMs or non-guild contexts: no channel to create under; ignore.
+            return
+
+        # Create the opencode session first so we can use its id as a slug
+        # fallback and in the channel topic.
+        try:
+            session = await self.client.create_session(title="discord-voice-message")
+        except OpencodeError as e:
+            try:
+                await message.channel.send(f"Failed to create opencode session: {e}")
+            except discord.HTTPException:
+                _log.warning(
+                    "failed to post voice-message session-creation error: %r", e
+                )
+            return
+        sid = session["id"]
+        short_sid = sid[:8] if sid else "unknown"
+        slug = _slugify_prompt("voice-message", fallback=f"oc-vm-{short_sid}")
+
+        # Resolve the target category (best-effort; create with no parent if
+        # unset or not found). Duplicated from `_run_talk_session` (the
+        # refactor to a shared helper is out of scope — it would touch three
+        # working methods).
+        category: discord.CategoryChannel | None = None
+        cat_id = config.discord_bot_session_category_id
+        if cat_id:
+            resolved = guild.get_channel(cat_id)
+            if isinstance(resolved, discord.CategoryChannel):
+                category = resolved
+
+        try:
+            new_channel = await guild.create_text_channel(
+                name=slug,
+                category=category,
+                topic=f"opencode voice-message session {sid} (started by {message.author})",
+                reason=f"voice message by {message.author}",
+            )
+        except discord.HTTPException as e:
+            try:
+                await message.channel.send(
+                    f"Failed to create session channel `{slug}`: {e}"
+                )
+            except discord.HTTPException:
+                _log.warning("failed to post channel-creation error: %r", e)
+            return
+        await self.router.bind(new_channel.id, sid)
+
+        # Post the pointer into the TRIGGER channel (replaces
+        # `ctx.followup.send` since there's no slash interaction here).
+        try:
+            await message.channel.send(
+                f"Created {new_channel.mention} — transcribing "
+                f"{attachment.size / 1_000_000:.1f}MB of audio. "
+                f"Continuing in the text channel."
+            )
+        except discord.HTTPException as e:
+            _log.warning("failed to post voice-message trigger-channel pointer: %r", e)
+
+        # Post a "transcribing" status in the new channel BEFORE the
+        # transcription runs, so the user sees the channel + processing message
+        # immediately.
+        status_msg = await new_channel.send(
+            f"Transcribing `{attachment.filename}` "
+            f"({attachment.size / 1_000_000:.1f}MB)…"
+        )
+
+        # Download + transcribe. Both can fail (ffmpeg missing, Whisper key
+        # unset, corrupt media); surface the error in the new channel (which
+        # the user already has a pointer to) and leave the channel bound so
+        # the user can follow up with text.
+        try:
+            media_bytes = await attachment.read()
+            wav_bytes = await extract_audio_to_wav(
+                media_bytes,
+                content_type=attachment.content_type,
+                filename=attachment.filename,
+            )
+            transcript = await transcribe_audio(wav_bytes)
+        except Exception as e:  # noqa: BLE001 — transcription failures are user-facing
+            _log.warning("voice-message transcription failed: %r", e)
+            await status_msg.edit(
+                content=f"Failed to transcribe `{attachment.filename}`: {e}. "
+                f"The session is bound to this channel — type your plan as "
+                f"text and it will be forwarded to the same opencode session."
+            )
+            return
+
+        transcript = (transcript or "").strip()
+        if not transcript:
+            await status_msg.edit(
+                content="Transcription came back empty (no speech detected). "
+                "The session is bound to this channel — type your plan as "
+                "text to continue."
+            )
+            return
+
+        # Best-effort LLM slug upgrade from the now-available transcript.
+        asyncio.create_task(
+            self._rename_when_slug_ready(
+                new_channel, transcript, fallback=new_channel.name
+            )
+        )
+
+        # Send the transcript to the plan-author agent with no plan_type
+        # directive (a plain message has no slash-option UI, so let the agent
+        # classify from the transcript wording — matches /oc_talk with
+        # plan_type=None).
+        parts = [{"type": "text", "text": transcript}]
+        try:
+            await self.client.send_prompt_async(sid, parts, agent="plan-author")
+        except OpencodeError as e:
+            await new_channel.send(f"Failed to send prompt to session `{sid}`: {e}")
+            return
+
+        # Replace the "transcribing…" status with the transcript, then start
+        # the opencode progress loop.
+        await status_msg.edit(
+            content=f"**Transcribed prompt:**\n```\n{transcript}\n```"
+        )
+        progress_msg = await new_channel.send(f"Working on session `{sid}`…")
+        await self._drive_session(
+            sid,
+            send_chunk=new_channel.send,
+            progress_msg=progress_msg,
+            voice_session=None,  # no live voice path
         )
 
 

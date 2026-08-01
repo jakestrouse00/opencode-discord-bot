@@ -179,10 +179,17 @@ If `/oc` doesn't show up in Discord after the bot starts:
   propagate. Set `DISCORD_BOT_GUILD_ID=<your server id>` for instant guild
   sync.
 - Run `python -m bot.sync_commands --guild <your server id>` to force a
-  one-off sync without starting the gateway.
-- The bot's `on_connect` auto-syncs on login (Pycord default). If it didn't,
-  check the bot has `applications.commands` scope in your server (OAuth2 URL
+  one-off sync without starting the gateway. **This is the only way commands
+  are pushed** — the bot does NOT auto-sync on startup (auto-sync was
+  disabled because it pushed a global copy on every login, which combined
+  with the guild-scoped sync produced duplicate entries in the Discord UI).
+  Re-run this after any change to the slash-command surface.
+- Verify the bot has `applications.commands` scope in your server (OAuth2 URL
   Generator).
+- If you see duplicate commands after migrating from the old auto-sync path,
+  delete the orphaned global set once:
+  `python -m bot.sync_commands --guild 0` (with `commands=[]`) or call
+  `await bot.sync_commands(commands=[], guild_ids=None)` after `login()`.
 
 ### Voice on Windows
 `ffmpeg` on Windows installs as a `.exe` (works directly). Pycord voice on

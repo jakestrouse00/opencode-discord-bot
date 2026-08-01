@@ -44,7 +44,8 @@ from typing import Sequence
 
 from opencode_discord_bot.config import config
 
-# The project directory: the user's current working directory at launch time.
+# The project directory: the user's current working directory at launch time,
+# unless overridden via `OPENCODE_SERVE_CWD` (see `config.opencode_serve_cwd`).
 # Used as the default cwd for the spawned `opencode serve` subprocess so the
 # server's `process.cwd()` resolves to the user's project (where their
 # `.opencode/` lives) — see the `defaultDirectory` resolver in opencode's
@@ -56,8 +57,13 @@ from opencode_discord_bot.config import config
 # silent plan-loss bug. `Path.cwd()` is correct here (not
 # `Path(__file__).resolve().parent.parent`, which would resolve to the
 # package install dir in the standalone context) because the bot should
-# spawn `opencode serve` in the user's current project directory.
-_REPO_ROOT = Path.cwd()
+# spawn `opencode serve` in the user's current project directory. The
+# `OPENCODE_SERVE_CWD` override decouples this from the bot's launch dir
+# (where `.env` is discovered), so the bot can be launched from a subdir
+# while the server still resolves sessions to the real project root.
+_REPO_ROOT = (
+    Path(config.opencode_serve_cwd) if config.opencode_serve_cwd else Path.cwd()
+)
 
 
 def _resolve_opencode_argv() -> list[str] | None:

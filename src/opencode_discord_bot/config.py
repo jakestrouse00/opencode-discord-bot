@@ -16,8 +16,9 @@ Env-var overrides (uppercase of the field name):
   / DISCORD_BOT_SESSION_CATEGORY_ID
   OPENCODE_SERVER_URL / OPENCODE_SERVER_PASSWORD / OPENCODE_SERVE_ENABLED
   / OPENCODE_SERVE_PORT / OPENCODE_SERVE_HOSTNAME / OPENCODE_SERVE_CORS
-  / OPENCODE_SERVE_STARTUP_TIMEOUT
-  VOICE_SILENCE_TIMEOUT_SECONDS / VOICE_CHUNK_SECONDS / VOICE_STT_PROVIDER
+  / OPENCODE_SERVE_STARTUP_TIMEOUT / OPENCODE_SERVE_CWD
+  VOICE_MESSAGE_ENABLED / VOICE_MESSAGE_TRIGGER_CHANNEL_ID
+  / VOICE_SILENCE_TIMEOUT_SECONDS / VOICE_CHUNK_SECONDS / VOICE_STT_PROVIDER
   / VOICE_STT_MODEL / VOICE_LOCAL_WHISPER_MODEL / VOICE_TTS_ENABLED
   / VOICE_TTS_MODEL / VOICE_TTS_VOICE / VOICE_TTS_SPEED
   WHISPER_MODEL / WHISPER_DEVICE / WHISPER_COMPUTE_TYPE
@@ -60,6 +61,28 @@ class BotConfig(BaseSettings):
     opencode_serve_hostname: str = "127.0.0.1"
     opencode_serve_cors: list[str] = Field(default_factory=list)
     opencode_serve_startup_timeout: float = 30.0
+    # Working directory for the `opencode serve` subprocess. Empty = use
+    # Path.cwd() at launch (the historical behavior). Set to an absolute path
+    # to decouple the server's project dir from the bot's launch dir — useful
+    # when the bot's .env lives in a subdirectory but the user's .opencode/
+    # (plans, agents, config) lives at the project root. The server's
+    # process.cwd() determines which .opencode/ tree every session resolves to
+    # (opencode's defaultDirectory resolver falls back to process.cwd() when
+    # no ?directory= query / x-opencode-directory header is on the request).
+    opencode_serve_cwd: str = ""
+
+    # --- voice messages (press-hold mic in the mobile composer) ---
+    # When True, the bot transcribes Discord voice-message attachments arriving
+    # as plain messages and routes the transcript to plan-author (follow-up in
+    # a session channel, or new session in the trigger channel below). Set
+    # False to disable voice-message intake without affecting /oc_talk or
+    # /oc_voice.
+    voice_message_enabled: bool = True
+    # The channel id where voice messages trigger a NEW plan-author session
+    # (branch c of on_message). Voice messages in existing session channels
+    # still work as follow-ups regardless of this value. 0 = disabled (only
+    # follow-ups work). Defaults to #new-plans (1533242090862149842).
+    voice_message_trigger_channel_id: int = 1533242090862149842
 
     # --- voice (STT/TTS) ---
     voice_silence_timeout_seconds: float = 10.0

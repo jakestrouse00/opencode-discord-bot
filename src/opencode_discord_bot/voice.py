@@ -100,22 +100,14 @@ def _openai_client():
     return AsyncOpenAI(api_key=config.openai_api_key)
 
 
-def _get_local_whisper():
-    """Lazy singleton for the in-process faster-whisper model (local STT).
+def _construct_local_whisper():
+    """Synchronously construct the faster-whisper model (heavy, ~140MB+).
 
-    `import faster_whisper` is lazy so the bot starts fine without
-    `faster-whisper` installed. The model load (~140MB for `base`) happens
-    once per process and is cached on the module-level
-    `_LOCAL_WHISPER_MODEL`. Raises a clear RuntimeError if `faster-whisper`
-    isn't installed.
-
-    Uses CTranslate2 under the hood (the `faster-whisper` backend), which is
-    4x faster / 2x smaller than openai-whisper with equivalent accuracy. No
-    cloud API, no per-request cost, privacy-preserving.
+    Import is lazy so the bot starts fine without `faster-whisper` installed.
+    Raises a clear RuntimeError in that case. This function blocks for the
+    multi-second model load and must NOT be called on the event loop — wrap
+    the call site in `asyncio.to_thread`.
     """
-    global _LOCAL_WHISPER_MODEL
-    if _LOCAL_WHISPER_MODEL is not None:
-        return _LOCAL_WHISPER_MODEL
     try:
         from faster_whisper import WhisperModel
     except ImportError as e:
@@ -124,11 +116,32 @@ def _get_local_whisper():
             "(pip install faster-whisper) or set VOICE_STT_PROVIDER=openai "
             "for the cloud path."
         ) from e
-    _LOCAL_WHISPER_MODEL = WhisperModel(
+    return WhisperModel(
         config.voice_local_whisper_model,
         device=config.whisper_device,
         compute_type=config.whisper_compute_type,
     )
+
+
+def _get_local_whisper():
+    """Lazy singleton for the in-process faster-whisper model (local STT).
+
+    The model load (~140MB for `base`) happens once per process and is cached
+    on the module-level `_LOCAL_WHISPER_MODEL`. Raises a clear RuntimeError if
+    `faster-whisper` isn't installed.
+
+    Uses CTranslate2 under the hood (the `faster-whisper` backend), which is
+    4x faster / 2x smaller than openai-whisper with equivalent accuracy. No
+    cloud API, no per-request cost, privacy-preserving.
+
+    Note: the construction is synchronous and multi-second. Callers on the
+    event loop should use `await asyncio.to_thread(_get_local_whisper)` (the
+    async transcription path in `_transcribe_local` already does this).
+    """
+    global _LOCAL_WHISPER_MODEL
+    if _LOCAL_WHISPER_MODEL is not None:
+        return _LOCAL_WHISPER_MODEL
+    _LOCAL_WHISPER_MODEL = _construct_local_whisper()
     return _LOCAL_WHISPER_MODEL
 
 
@@ -175,7 +188,7 @@ async def _transcribe_local(audio_bytes: bytes) -> str:
     with spaces. Like openai-whisper, it reads from a file path, not bytes —
     write a temp WAV first.
     """
-    model = _get_local_whisper()
+    model = await asyncio.to_thread(_get_local_whisper)
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
         tmp.write(audio_bytes)
         tmp_path = tmp.name

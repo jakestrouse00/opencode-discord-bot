@@ -20,9 +20,14 @@ control bot.
   the full list.
 - **Run:** `python -m opencode_discord_bot` (or `opencode-discord-bot`). The
   bot starts the Discord gateway, auto-spawns `opencode serve` as a child
-  process (unless `OPENCODE_SERVE_ENABLED=false`), and registers slash
-  commands to the configured guild (`DISCORD_BOT_GUILD_ID`) or globally (if
-  `0`).
+  process (unless `OPENCODE_SERVE_ENABLED=false`). **Slash commands are NOT
+  auto-synced on startup** — `auto_sync_commands=False` is set in
+  `OpencodeBot.__init__` to prevent Pycord's `on_connect` from pushing a
+  global copy of every command on every login (which, combined with the
+  guild-scoped commands pushed by `sync_commands.py`, produced duplicate
+  entries in the Discord UI). Sync commands explicitly via
+  `python -m opencode_discord_bot.sync_commands --guild <id>` after any
+  change to the slash-command surface.
 - **Privileged intent:** the **Message Content** gateway intent MUST be
   enabled in the Discord Developer Portal (Bot -> Privileged Gateway Intents)
   for plain-text follow-ups to work. The bot sets `intents.message_content =
@@ -63,9 +68,15 @@ control bot.
   `shutil.which("opencode")` first, then `npx -y -p opencode-ai opencode`
   (npm fallback). Readiness: polls `GET /global/health` until 200 or
   `startup_timeout` elapses. Teardown: Windows `taskkill /T /F` (tree-kill),
-  POSIX `SIGTERM` → `SIGKILL` after grace. Idempotent. `_REPO_ROOT = Path.cwd()`
-  so `opencode serve`'s `process.cwd()` resolves to the user's current project
-  directory (where their `.opencode/` lives) — NOT the package install dir.
+  POSIX `SIGTERM` → `SIGKILL` after grace. Idempotent. `_REPO_ROOT` defaults
+  to `Path.cwd()` so `opencode serve`'s `process.cwd()` resolves to the
+  user's current project directory (where their `.opencode/` lives) — NOT
+  the package install dir. Override via `OPENCODE_SERVE_CWD` (absolute path)
+  to decouple the server's project dir from the bot's launch dir — useful
+  when the bot's `.env` lives in a subdirectory but the user's `.opencode/`
+  (plans, agents, config) lives at the project root; without it, sessions
+  resolve to the subdir and can't find plans/agents (the silent plan-loss
+  bug).
 - **`SessionRouter`** (`session_router.py`) — maps Discord channel id ->
   opencode session id, persisted to `.opencode-discord-bot-sessions.json`
   (gitignored). One persistent opencode session per Discord channel. Loaded
@@ -86,6 +97,22 @@ control bot.
   (ffmpeg subprocess) then transcribes it. Three stop triggers: "Stop
   Conversation" phrase, `/oc_voice_stop`, or `voice_silence_timeout_seconds`
   of continuous silence.
+- **Voice-message intake** (`on_message` in `commands.py`): a regular
+  `discord.Message` with an `audio/ogg` / `application/ogg` attachment and
+  usually empty `content` (a Discord "voice message" — press-hold mic in the
+  mobile composer) is detected by `OpencodeBot._voice_attachment`, normalized
+  via the existing `extract_audio_to_wav` + `transcribe_audio` pipeline
+  (same as `/oc_talk`), and routed by `on_message`'s four-branch dispatch:
+  (a) a voice message in a session channel → follow-up prompt via
+  `_run_voice_followup`; (b) text in a session channel → existing text
+  follow-up path (unchanged); (c) a voice message in the trigger channel
+  (`voice_message_trigger_channel_id`, default `#new-plans` / channel id
+  `1533242090862149842`) → new plan-author session via
+  `_run_talk_from_message`; (d) else ignored. Gated by `voice_message_enabled`
+  (config, default True). No `plan_type` directive is sent for voice-message
+  new sessions (no slash-option UI) — the `plan-author` agent classifies from
+  the transcript. No new deps; reuses the `/oc_talk` pipeline verbatim. Does
+  NOT touch `/oc_voice` or the DAVE-broken sinks path.
 - **Slug LLM** (`slug.py`): `generate_slug()` makes one `httpx` POST to an
   OpenAI-compatible `/chat/completions` endpoint (Ollama Cloud by default) to
   produce a Discord channel-name slug from the user's prompt. NEVER raises —
@@ -153,7 +180,8 @@ control bot.
   `DISCORD_BOT_SESSION_CATEGORY_ID` / `OPENCODE_SERVER_URL` /
   `OPENCODE_SERVER_PASSWORD` / `OPENCODE_SERVE_ENABLED` /
   `OPENCODE_SERVE_PORT` / `OPENCODE_SERVE_HOSTNAME` / `OPENCODE_SERVE_CORS`
-  (JSON list) / `OPENCODE_SERVE_STARTUP_TIMEOUT` /
+  (JSON list)   / `OPENCODE_SERVE_STARTUP_TIMEOUT` / `OPENCODE_SERVE_CWD` /
+  `VOICE_MESSAGE_ENABLED` / `VOICE_MESSAGE_TRIGGER_CHANNEL_ID` /
   `VOICE_SILENCE_TIMEOUT_SECONDS` / `VOICE_CHUNK_SECONDS` /
   `VOICE_STT_PROVIDER` / `VOICE_STT_MODEL` / `VOICE_LOCAL_WHISPER_MODEL` /
   `VOICE_TTS_ENABLED` / `VOICE_TTS_MODEL` / `VOICE_TTS_VOICE` /
