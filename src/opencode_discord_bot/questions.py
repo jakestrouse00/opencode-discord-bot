@@ -145,6 +145,15 @@ class QuestionView(ui.View):
     poller cancels it via ``stop()`` when the session ends.
     """
 
+    # Max questions rendered in the multi-question layout. Discord caps a View
+    # at 5 rows (0-4). The multi layout needs one row per select menu, plus one
+    # row for the per-question "Custom Q{n}" buttons (all on a shared row), plus
+    # a final row for the Reject + Submit buttons. So selects can occupy at most
+    # 3 rows (rows 0-2), custom buttons take row 3, and submit/reject take row 4.
+    # Questions beyond this are dropped with a warning (the agent rarely asks >3
+    # in one call).
+    _MAX_RENDERED_QUESTIONS = 3
+
     def __init__(
         self,
         request: dict,
@@ -260,11 +269,16 @@ class QuestionView(ui.View):
     # --- multi-question layout ---
 
     def _build_multi(self) -> None:
-        # One select per question (rows 0..N-1), submit + custom buttons share
-        # later rows. Discord caps at 5 rows; questions beyond 5 are dropped
-        # with a warning (the agent rarely asks >5 in one call).
-        max_questions = 5
-        for idx, info in enumerate(self._questions[:max_questions]):
+        # One select per question (rows 0..N-1). Custom-answer buttons for ALL
+        # questions share a single later row (Discord allows up to 5 buttons per
+        # row, and N <= _MAX_RENDERED_QUESTIONS <= 3 fits). Submit + reject
+        # buttons share the final row. Discord caps a View at 5 rows total, so
+        # selects (<=3) + custom buttons (1 row) + submit/reject (1 row) <= 5.
+        max_questions = self._MAX_RENDERED_QUESTIONS
+        rendered = self._questions[:max_questions]
+        custom_row = len(rendered)  # row index shared by all custom buttons
+
+        for idx, info in enumerate(rendered):
             options = info.get("options") or []
             multiple = info.get("multiple") is True
             select = ui.Select(
@@ -292,19 +306,26 @@ class QuestionView(ui.View):
             select.callback = _cb
             self.add_item(select)
 
+        # All per-question custom buttons share a single row (custom_row). A
+        # select menu occupies a full row, so a custom button can NOT share a
+        # row with its select (that was the bug: 6 > 5 width). Grouping all
+        # custom buttons on one row keeps selects on their own rows and stays
+        # within Discord's 5-button-per-row limit (max_questions <= 3).
+        for idx, info in enumerate(rendered):
             custom = info.get("custom") is not False
-            if custom:
-                custom_btn = ui.Button(
-                    label=f"Custom Q{idx + 1}",
-                    style=discord.ButtonStyle.secondary,
-                    row=idx,
-                )
+            if not custom:
+                continue
+            custom_btn = ui.Button(
+                label=f"Custom Q{idx + 1}",
+                style=discord.ButtonStyle.secondary,
+                row=custom_row,
+            )
 
-                def _ccb(interaction: discord.Interaction, _idx: int = idx) -> Any:
-                    return self._on_custom_multi(interaction, _idx)
+            def _ccb(interaction: discord.Interaction, _idx: int = idx) -> Any:
+                return self._on_custom_multi(interaction, _idx)
 
-                custom_btn.callback = _ccb
-                self.add_item(custom_btn)
+            custom_btn.callback = _ccb
+            self.add_item(custom_btn)
 
         if len(self._questions) > max_questions:
             _log.warning(
@@ -350,7 +371,8 @@ class QuestionView(ui.View):
 
     async def _refresh_submit_state(self, interaction: discord.Interaction) -> None:
         if hasattr(self, "submit_btn"):
-            have_all = all(i in self._answers for i in range(len(self._questions[:5])))
+            n = min(len(self._questions), self._MAX_RENDERED_QUESTIONS)
+            have_all = all(i in self._answers for i in range(n))
             self.submit_btn.disabled = not have_all
         try:
             await interaction.response.edit_message(view=self)
@@ -360,10 +382,11 @@ class QuestionView(ui.View):
     async def _on_submit_multi(self, interaction: discord.Interaction) -> None:
         if self._done:
             return
-        if any(i not in self._answers for i in range(len(self._questions[:5]))):
+        n = min(len(self._questions), self._MAX_RENDERED_QUESTIONS)
+        if any(i not in self._answers for i in range(n)):
             return
         self._done = True
-        answers = [self._answers[i] for i in range(len(self._questions[:5]))]
+        answers = [self._answers[i] for i in range(n)]
         await self._on_submit(answers)
 
     async def _on_reject_click(self, interaction: discord.Interaction) -> None:
@@ -566,19 +589,33 @@ async def poll_pending_requests(
     """
     seen: set[str] = set()
     surfaced_questions: set[str] = set()
+    # Adaptive backoff: poll fast when requests are surfacing, slow down when
+    # the session is quiet. Reset to the base interval the moment a new
+    # request appears so the UI stays responsive.
+    cur_interval = interval
     try:
         while not stop_event.is_set():
-            try:
-                questions = await client.list_questions()
-            except OpencodeError as e:
-                _log.warning("list_questions failed: %r", e)
+            # These two GETs are independent round-trips to the same server;
+            # run them concurrently to halve per-iteration latency (a 30-min
+            # session at a 2s cadence is ~900 round-trips — gathering saves
+            # ~900 RTTs' worth of wall time).
+            questions_result, permissions_result = await asyncio.gather(
+                client.list_questions(),
+                client.list_permissions(),
+                return_exceptions=True,
+            )
+            if isinstance(questions_result, Exception):
+                _log.warning("list_questions failed: %r", questions_result)
                 questions = []
-            try:
-                permissions = await client.list_permissions()
-            except OpencodeError as e:
-                _log.warning("list_permissions failed: %r", e)
+            else:
+                questions = questions_result
+            if isinstance(permissions_result, Exception):
+                _log.warning("list_permissions failed: %r", permissions_result)
                 permissions = []
+            else:
+                permissions = permissions_result
 
+            new_requests = 0
             for req in questions:
                 if not isinstance(req, dict):
                     continue
@@ -589,6 +626,7 @@ async def poll_pending_requests(
                     continue
                 seen.add(rid)
                 surfaced_questions.add(rid)
+                new_requests += 1
                 # Voice path: speak the question, capture + transcribe the
                 # spoken answer, post it back. Falls back to buttons on empty.
                 if voice_session is not None:
@@ -608,22 +646,37 @@ async def poll_pending_requests(
                 if not rid or rid in seen:
                     continue
                 seen.add(rid)
+                new_requests += 1
                 await _send_permission(channel, client, req)
 
+            # Adaptive backoff: when nothing surfaced, grow the interval (cap
+            # at 2x the base — most rounds have zero pending requests, so this
+            # roughly halves poll count on quiet sessions without noticeably
+            # delaying the next request render). Reset on activity.
+            if new_requests > 0:
+                cur_interval = interval
+            else:
+                cur_interval = min(cur_interval * 1.5, interval * 2.0)
+
             try:
-                await asyncio.wait_for(stop_event.wait(), timeout=interval)
+                await asyncio.wait_for(stop_event.wait(), timeout=cur_interval)
             except asyncio.TimeoutError:
                 pass
     except asyncio.CancelledError:
         raise
     finally:
         # Best-effort cleanup: reject surfaced questions that were never
-        # answered so the agent turn doesn't hang on a parked deferred.
-        for rid in list(surfaced_questions):
-            try:
-                await client.reject_question(rid)
-            except (OpencodeError, Exception) as e:  # noqa: BLE001
-                _log.debug("cleanup reject for %s: %r", rid, e)
+        # answered so the agent turn doesn't hang on a parked deferred. Run
+        # the rejects concurrently — they're independent POSTs and serial
+        # waits would stall shutdown when several were surfaced.
+        if surfaced_questions:
+            results = await asyncio.gather(
+                *(client.reject_question(rid) for rid in list(surfaced_questions)),
+                return_exceptions=True,
+            )
+            for rid, res in zip(surfaced_questions, results):
+                if isinstance(res, Exception):  # noqa: BLE001
+                    _log.debug("cleanup reject for %s: %r", rid, res)
 
 
 async def _voice_answer_question(

@@ -58,6 +58,15 @@ OnStatus = Callable[[SessionStatus], Awaitable[None]]
 # genuinely-dead prompt.
 _BUSY_GRACE_SECONDS = 30.0
 
+# Backoff cap for the adaptive poll interval. When the session status is
+# unchanged from the previous poll (the common case during a long-running
+# agent turn), the interval grows up to this multiple of the base `interval`
+# before being capped. A 30-min session at a fixed 2s cadence is ~900 polls;
+# capping at 3x cuts that to ~300 once the steady-state "busy" is reached,
+# without delaying the idle->terminal transition by more than the (capped)
+# interval. Reset to the base the moment the status changes.
+_BACKOFF_CAP_MULTIPLIER = 3.0
+
 
 async def poll_until_idle(
     client: OpencodeClient,
@@ -79,7 +88,11 @@ async def poll_until_idle(
        loop keeps polling.
     3. On any status *change*, invokes ``on_status(status)`` so the caller
        can render progress. Identical consecutive statuses are skipped to
-       avoid spamming the Discord message-edit rate limit.
+       avoid spamming the Discord message-edit rate limit, AND grow the
+       poll interval (adaptive backoff, capped at
+       ``_BACKOFF_CAP_MULTIPLIER`` x the base) to cut poll count on long
+       steady-state "busy" runs. The interval resets to the base on any
+       status change.
     4. Returns the final status once ``type == "idle"`` is terminal (see #2).
 
     The first fetch is preceded by a short sleep equal to `interval` so the
@@ -99,6 +112,7 @@ async def poll_until_idle(
     start = loop.time()
     last_status: SessionStatus | None = None
     saw_busy = False
+    cur_interval = interval
     while True:
         if deadline is not None:
             remaining = deadline - loop.time()
@@ -106,9 +120,9 @@ async def poll_until_idle(
                 raise asyncio.TimeoutError(
                     f"session {session_id} did not become idle within {timeout}s"
                 )
-            sleep_for = min(interval, remaining)
+            sleep_for = min(cur_interval, remaining)
         else:
-            sleep_for = interval
+            sleep_for = cur_interval
 
         # Sleep BEFORE the fetch (including the first iteration) so the
         # forked prompt_async effect has a chance to run `status.set(...,
@@ -132,12 +146,20 @@ async def poll_until_idle(
 
         if status != last_status:
             last_status = status
+            # Reset the backoff on any status change so we stay responsive
+            # to the idle transition (and to retry->busy etc.).
+            cur_interval = interval
             try:
                 await on_status(status)
             except (
                 Exception
             ):  # noqa: BLE001 — a progress-render error must not kill the poll
                 _log.warning("on_status callback raised", exc_info=True)
+        else:
+            # Unchanged status: grow the interval up to the cap. Halves the
+            # poll count on long steady-state "busy" runs without losing the
+            # idle signal (worst-case detection delay = one capped interval).
+            cur_interval = min(cur_interval * 1.5, interval * _BACKOFF_CAP_MULTIPLIER)
 
         if status.get("type") == "idle":
             # Terminal only once the session has been observed busy (the

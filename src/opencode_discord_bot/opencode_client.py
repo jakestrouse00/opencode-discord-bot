@@ -28,8 +28,10 @@ parse. `stream_events` is retained for other potential consumers.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import re
 from collections.abc import AsyncGenerator
 from typing import Any
 
@@ -45,6 +47,28 @@ def _auth() -> tuple[str, str] | None:
         return None
     username = os.environ.get("OPENCODE_SERVER_USERNAME", "opencode")
     return (username, password)
+
+
+# Retry config for idempotent GETs (see `OpencodeClient._request_get_with_retry`).
+_GET_RETRY_ATTEMPTS = 3
+_GET_RETRY_BACKOFF = 0.5  # seconds; linear backoff: 0.5s, 1.0s, ...
+
+_STATUS_RE = re.compile(r"-> (\d{3})")
+
+
+def _is_5xx_error(err: OpencodeError) -> bool:
+    """True if the OpencodeError message encodes a 5xx server status.
+
+    The error message is shaped like ``"GET /path -> 502: ..."`` (see
+    `_do_request`); parse the embedded status code to decide retryability.
+    """
+    m = _STATUS_RE.search(str(err))
+    if not m:
+        return False
+    try:
+        return 500 <= int(m.group(1)) < 600
+    except ValueError:
+        return False
 
 
 class OpencodeError(Exception):
@@ -69,7 +93,12 @@ class OpencodeClient:
             self._client = httpx.AsyncClient(
                 base_url=self._base_url,
                 auth=_auth(),
-                timeout=httpx.Timeout(connect=10.0, read=None, write=30.0, pool=30.0),
+                # `read=60` bounds how long a single REST read may stall —
+                # without it a hung server would block the pollers
+                # indefinitely. The SSE stream (`stream_events`) overrides
+                # this per-request with `timeout=None` since it's a long-lived
+                # connection.
+                timeout=httpx.Timeout(connect=10.0, read=60.0, write=30.0, pool=30.0),
                 headers={"Accept": "application/json"},
             )
         return self._client
@@ -83,6 +112,17 @@ class OpencodeClient:
 
     async def _request(self, method: str, path: str, **kw: Any) -> Any:
         client = await self._ac()
+        # Idempotent GETs get a small retry on transient transport errors or
+        # 5xx responses — a single blip from the opencode server shouldn't
+        # kill a long-running poll loop. POSTs are never retried (not
+        # idempotent; a re-send could duplicate a prompt or reply).
+        if method == "GET":
+            return await self._request_get_with_retry(client, method, path, **kw)
+        return await self._do_request(client, method, path, **kw)
+
+    async def _do_request(
+        self, client: httpx.AsyncClient, method: str, path: str, **kw: Any
+    ) -> Any:
         resp = await client.request(method, path, **kw)
         if resp.status_code >= 400:
             raise OpencodeError(
@@ -91,6 +131,31 @@ class OpencodeClient:
         if resp.status_code == 204 or not resp.content:
             return None
         return resp.json()
+
+    async def _request_get_with_retry(
+        self, client: httpx.AsyncClient, method: str, path: str, **kw: Any
+    ) -> Any:
+        last_exc: Exception | None = None
+        for attempt in range(_GET_RETRY_ATTEMPTS):
+            try:
+                return await self._do_request(client, method, path, **kw)
+            except OpencodeError as e:
+                # Only retry on 5xx (server-side transient); 4xx is a real
+                # client error (auth, not-found, bad-request) and should surface.
+                if not _is_5xx_error(e):
+                    raise
+                last_exc = e
+            except httpx.TransportError as e:
+                # Connection reset, read timeout, etc. — transient by nature.
+                last_exc = e
+            if attempt < _GET_RETRY_ATTEMPTS - 1:
+                await asyncio.sleep(_GET_RETRY_BACKOFF * (attempt + 1))
+        # Exhausted retries; re-raise the last transient error.
+        if isinstance(last_exc, OpencodeError):
+            raise
+        if last_exc is not None:
+            raise last_exc
+        raise OpencodeError(f"{method} {path} -> exhausted retries")
 
     # --- global ---
 
@@ -286,7 +351,13 @@ class OpencodeClient:
         """
         client = await self._ac()
         async with client.stream(
-            "GET", "/event", headers={"Accept": "text/event-stream"}
+            "GET",
+            "/event",
+            headers={"Accept": "text/event-stream"},
+            # The client's default read timeout (60s) would kill a long-lived
+            # SSE stream mid-iteration. Override per-request so the stream
+            # stays open until the server closes it or the caller cancels.
+            timeout=None,
         ) as r:
             if r.status_code >= 400:
                 raise OpencodeError(f"GET /event -> {r.status_code}: {r.text[:500]}")
