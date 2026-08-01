@@ -1,0 +1,55 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "opencode-discord-bot"
+version = "1.0.0"
+description = "Two-way Discord gateway for opencode — /oc, /oc_plan, /oc_voice, /oc_talk slash commands with voice-channel support"
+readme = "README.md"
+requires-python = ">=3.13"
+license = { text = "MIT" }
+authors = [{ name = "Jake Strouse" }]
+keywords = ["opencode", "discord", "bot", "pycord", "ai-agent"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Communications :: Chat",
+]
+dependencies = [
+    # Discord gateway (Pycord, NOT discord.py — provides the voice
+    # recording/sinks API /oc_voice needs). Pinned to 2.8.1. NOTE: Pycord
+    # 2.8.1's voice reception is broken by Discord's DAVE (End-to-End
+    # Encryption) protocol on modern voice channels — /oc_voice recording
+    # does not currently work; a replacement voice-capture solution is being
+    # sought. See AGENTS.md Known-broken.
+    "py-cord[voice]>=2.8.1",
+    # Async HTTP client (opencode serve REST API + slug LLM endpoint).
+    "httpx",
+    # Settings management (BotConfig reads .env + env vars).
+    "pydantic-settings",
+    # Pycord voice transport crypto dep.
+    "PyNaCl",
+    # Pycord transitive dep needed on Python 3.13+ (stdlib audioop removed).
+    "audioop-lts; python_version >= '3.13'",
+    # Local STT via CTranslate2 (default VOICE_STT_PROVIDER=local). 4x faster
+    # / 2x smaller than openai-whisper. No cloud API, no per-request cost.
+    "faster-whisper>=1.0.0",
+    "ctranslate2>=4.0.0",
+    # OpenAI API client — used for TTS + cloud STT fallback. Not needed if
+    # voice_tts_enabled=false AND voice_stt_provider=local.
+    "openai",
+]
+
+[project.urls]
+Homepage = "https://github.com/jakestrouse00/opencode-discord-bot"
+Repository = "https://github.com/jakestrouse00/opencode-discord-bot"
+
+[project.scripts]
+opencode-discord-bot = "opencode_discord_bot.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/opencode_discord_bot"]
