@@ -54,3 +54,11 @@ comulytic-bridge = "opencode_discord_bot.bridge:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/opencode_discord_bot"]
+# Force-include the bundled opencode agent (and anything else under
+# src/opencode_discord_bot/agent/) into the wheel. Hatchling only includes
+# `.py` files + directories listed in `packages` by default; the `.md` agent
+# file is package data read at install time via `importlib.resources` (see
+# `opencode_discord_bot/install_agent.py`). Without this force-include, the
+# agent file would be silently dropped from sdists/wheels and
+# `install_agent._bundled_text()` would exit(1) with a clear message.
+force-include = { "src/opencode_discord_bot/agent" = "opencode_discord_bot/agent" }
