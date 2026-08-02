@@ -10,13 +10,17 @@ in a session channel are forwarded to the bound opencode session.
 ## Quick Setup Workflow
 
 1. Install Python 3.13+ and ffmpeg (system dep, see below).
-2. `pip install -r bot/requirements.txt` (or `pip install -e .` in the
-   standalone repo).
+2. `pip install -e .` from the cloned repo root (installs the
+   `opencode_discord_bot` package + the `opencode-discord-bot` console
+   script). Alternatively `pip install git+https://github.com/jakestrouse00/opencode-discord-bot.git`.
 3. Create a Discord application + bot, invite it to your server (see
    "Invite Bot to Discord").
-4. Copy `bot/.env.example` to `.env`, fill in `DISCORD_BOT_TOKEN` and
-   `OPENCODE_SERVER_PASSWORD` (required), plus optional voice/slug keys and
-   model overrides.
+4. Copy `.env.example` to `.env` (in the directory you run the bot from),
+   fill in `DISCORD_BOT_TOKEN` and `OPENCODE_SERVER_PASSWORD` (required),
+   plus optional voice/slug keys and model overrides. See "Create `.env`
+   File" below for the full matrix, including `OPENCODE_SERVE_CWD` when
+   the bot's `.env` lives in a subdirectory but the target project's
+   `.opencode/` lives at a different project root.
 5. Enable the **Message Content** privileged intent in the Discord Developer
    Portal (Bot -> Privileged Gateway Intents) — without it, plain-text
    follow-ups silently break.
@@ -24,10 +28,27 @@ in a session channel are forwarded to the bound opencode session.
    bot will run against: `python -m opencode_discord_bot.install_agent` (run
    from that project's root, or pass `--dest <project root>`). See "Install the
    plan-author agent" below. Skip this only if the target project already has
-   its own `plan-author` agent you want to keep.
-7. `python -m bot` (from the repo root, or any directory if using the
-   standalone package).
-8. In Discord, use `/oc <your prompt>` — the bot creates a channel, runs the
+   its own `plan-author` agent you want to keep. The `--dest` MUST match
+   `OPENCODE_SERVE_CWD` (or the repo root if you left it empty), otherwise
+   the opencode server won't find the agent.
+7. Sync slash commands to your guild (one-shot; the bot does NOT auto-sync
+   on startup): `python -m opencode_discord_bot.sync_commands --guild <guild id>`.
+   This pushes the surface — including `/oc_setup` — so they appear in Discord.
+8. `python -m opencode_discord_bot` (from the repo root, or any directory if
+   using the standalone package). The gateway starts and auto-spawns
+   `opencode serve` as a child process.
+9. In Discord, invoke `/oc_setup` in your server (requires the Manage
+   Channels permission). It creates a category "OpenCode Sessions" plus
+   two text channels (`voice-recordings` → `VOICE_MESSAGE_TRIGGER_CHANNEL_ID`,
+   `bot-commands` → `DISCORD_BOT_ALLOWED_CHANNEL_IDS`), writes their IDs +
+   the guild id to `.env`, and reloads config live. Only runs once per guild
+   (refuses if any guild-specific field is already set). See
+   "/oc_setup — one-time guild setup" below.
+10. Stop the bot (Ctrl-C), then re-run
+   `python -m opencode_discord_bot.sync_commands --guild <guild id>` so every
+   command is registered now that `/oc_setup` has written the guild config.
+   Restart the bot for normal use.
+11. In Discord, use `/oc <your prompt>` — the bot creates a channel, runs the
    opencode session, and posts the response there.
 
 ## Required Dependencies
@@ -39,13 +60,15 @@ automatically (listed in `requirements.txt`).
 
 ### pip packages
 ```bash
-pip install -r bot/requirements.txt
+pip install -e .
 ```
-Installs: `py-cord[voice]` (Discord gateway, Pycord 2.8.1), `httpx` (REST
-client), `pydantic-settings` (config), `PyNaCl` (voice crypto),
-`audioop-lts` (Python 3.13 audio dep), `faster-whisper` + `ctranslate2`
-(local STT — used by `/oc_voice`, `/oc_talk`, voice messages, AND the
-Comulytic bridge), `openai` (TTS + cloud STT fallback).
+From the cloned repo root. Installs: `py-cord[voice]` (Discord gateway,
+Pycord 2.8.1), `httpx` (REST client), `pydantic-settings` (config),
+`PyNaCl` (voice crypto), `audioop-lts` (Python 3.13 audio dep),
+`faster-whisper` + `ctranslate2` (local STT — used by `/oc_voice`,
+`/oc_talk`, voice messages, AND the Comulytic bridge), `openai` (TTS +
+cloud STT fallback). Alternatively
+`pip install git+https://github.com/jakestrouse00/opencode-discord-bot.git`.
 
 The `faster-whisper` + `ctranslate2` wheels are CPU-only by default; to run
 on an NVIDIA GPU (`WHISPER_DEVICE=cuda`) you also need CUDA 12 + cuBLAS +
@@ -141,7 +164,7 @@ local failure).
 
 ## Create `.env` File
 
-Copy `bot/.env.example` to `.env` (in the directory you run the bot from) and
+Copy `.env.example` to `.env` (in the directory you run the bot from) and
 fill in the values. At minimum:
 
 ```env
@@ -218,6 +241,58 @@ but your project root (with `.opencode/agent/`) lives elsewhere, set
 against the same project root — otherwise the server won't find the agent
 even though you installed it.
 
+## `/oc_setup` — one-time guild setup
+
+`/oc_setup` is a slash command that does the guild-specific Discord setup
+for you *inside* Discord, after the bot is running. It replaces the
+manual "create a category, create two channels, copy their IDs into
+`.env`" dance with one click. It's the recommended path for the
+guild-specific IDs (`DISCORD_BOT_SESSION_CATEGORY_ID`,
+`DISCORD_BOT_ALLOWED_CHANNEL_IDS`, `VOICE_MESSAGE_TRIGGER_CHANNEL_ID`).
+
+**Prerequisites:**
+- The bot must be running (`python -m opencode_discord_bot`) and logged
+  in to your guild.
+- You must first sync the command surface so `/oc_setup` exists in your
+  server: `python -m opencode_discord_bot.sync_commands --guild <guild id>`.
+- The invoking user needs the **Manage Channels** permission (it creates a
+  category + two channels).
+
+**What it does** (one invocation per guild):
+1. Creates a category named **"OpenCode Sessions"** in the invoking guild.
+2. Creates two text channels at the guild ROOT (NOT under the new
+   category, so `/oc_cleanup` — which deletes every text channel under
+   `DISCORD_BOT_SESSION_CATEGORY_ID` — won't wipe them):
+   - `voice-recordings` → set as `VOICE_MESSAGE_TRIGGER_CHANNEL_ID`
+     (voice messages posted here start new plan-author sessions).
+   - `bot-commands` → set as `DISCORD_BOT_ALLOWED_CHANNEL_IDS` (a
+     one-element JSON list so slash commands are restricted to this
+     channel + bot-created session channels).
+3. Writes the three created IDs to `.env` (cwd-relative, matching
+   `BotConfig`'s `env_file=".env"`) atomically via `env_writer`, so they
+   persist across restarts. Also writes `DISCORD_BOT_GUILD_ID` from
+   `ctx.guild.id` if it was previously unset (0).
+4. Reloads the `config` singleton in place so the running bot sees the
+   new IDs immediately (no restart needed for config — but see the
+   re-sync below).
+5. Replies ephemerally with a summary of what was created + the IDs.
+
+**It refuses to run twice.** If ANY of the three guild-specific output
+fields is already non-default, `/oc_setup` replies with an ephemeral
+"already set up" message and does nothing — to prevent silently
+overwriting a working setup or creating a duplicate "OpenCode Sessions"
+category. To re-run, clear `DISCORD_BOT_SESSION_CATEGORY_ID`,
+`DISCORD_BOT_ALLOWED_CHANNEL_IDS`, and `VOICE_MESSAGE_TRIGGER_CHANNEL_ID`
+in `.env` manually first. `DISCORD_BOT_GUILD_ID` is deliberately NOT part
+of this gate (it's an input to sync, not an output of setup).
+
+**After `/oc_setup`:** stop the bot (Ctrl-C) and re-run
+`python -m opencode_discord_bot.sync_commands --guild <guild id>` so
+every command is registered now that `/oc_setup` has written the guild
+config, then restart the bot for normal use. (The bot has
+`auto_sync_commands=False` to avoid duplicate UI entries, so a one-shot
+re-sync after setup is required.)
+
 ## Invite Bot to Discord
 
 1. Go to https://discord.com/developers/applications and create a new
@@ -278,10 +353,10 @@ break.
 
 ### `.sessions.json` permissions
 The bot persists channel->session bindings to a JSON file
-(`.opencode-discord-bot-sessions.json` in the standalone package, or
-`bot/.sessions.json` in the in-place layout). If the bot can't write to it
-(permissions), bindings are lost on restart but the bot still runs. The file
-is gitignored — it contains only session ids, no secrets.
+(`.opencode-discord-bot-sessions.json` in the run directory). If the bot
+can't write to it (permissions), bindings are lost on restart but the
+bot still runs. The file is gitignored — it contains only session ids,
+no secrets.
 
 ### Port 4096 in use
 `opencode serve` defaults to port 4096. If another process is using it, the
@@ -294,7 +369,7 @@ If `/oc` doesn't show up in Discord after the bot starts:
 - `DISCORD_BOT_GUILD_ID=0` means global sync, which can take up to 1 hour to
   propagate. Set `DISCORD_BOT_GUILD_ID=<your server id>` for instant guild
   sync.
-- Run `python -m bot.sync_commands --guild <your server id>` to force a
+- Run `python -m opencode_discord_bot.sync_commands --guild <your server id>` to force a
   one-off sync without starting the gateway. **This is the only way commands
   are pushed** — the bot does NOT auto-sync on startup (auto-sync was
   disabled because it pushed a global copy on every login, which combined
@@ -304,7 +379,7 @@ If `/oc` doesn't show up in Discord after the bot starts:
   Generator).
 - If you see duplicate commands after migrating from the old auto-sync path,
   delete the orphaned global set once:
-  `python -m bot.sync_commands --guild 0` (with `commands=[]`) or call
+  `python -m opencode_discord_bot.sync_commands --guild 0` (with `commands=[]`) or call
   `await bot.sync_commands(commands=[], guild_ids=None)` after `login()`.
 
 ### Voice on Windows
@@ -317,7 +392,7 @@ Windows needs `PyNaCl` (installed automatically via `py-cord[voice]`).
 
 After setup, verify each piece:
 
-- [ ] `python -c "from bot.commands import OpencodeBot; print('ok')"` — bot
+- [ ] `python -c "from opencode_discord_bot.commands import OpencodeBot; print('ok')"` — bot
   imports without error.
 - [ ] `ffmpeg -version` — ffmpeg is on PATH.
 - [ ] `python -c "import faster_whisper; print('ok')"` — local STT dep
@@ -327,8 +402,11 @@ After setup, verify each piece:
   — prints >0 when CUDA 12 + cuBLAS + cuDNN 9 are found; 0 = libs missing
   (re-check `LD_LIBRARY_PATH` on Linux / `PATH` on Windows; see "CUDA / GPU
   deps" above).
-- [ ] `python -m bot` starts without error and logs "Starting opencode Discord
+- [ ] `python -m opencode_discord_bot` starts without error and logs "Starting opencode Discord
   bot".
+- [ ] `/oc_setup` runs once in Discord and creates the "OpenCode Sessions"
+  category + `voice-recordings` + `bot-commands` channels (writes their IDs
+  to `.env`). Then re-run `sync_commands --guild <id>` and restart the bot.
 - [ ] `/oc hello` in Discord creates a channel and responds.
 - [ ] (Optional) `/oc_voice` joins a voice channel and transcribes your speech.
 - [ ] (Optional) `/oc_talk` with an audio attachment transcribes it.
@@ -545,13 +623,13 @@ env vars and not the Discord ones.
 
 ```bash
 # Check the bot token is set (without revealing it)
-python -c "from bot.config import config; print('token set' if config.discord_bot_token else 'EMPTY')"
+python -c "from opencode_discord_bot.config import config; print('token set' if config.discord_bot_token else 'EMPTY')"
 
 # Check opencode is on PATH
 python -c "import shutil; print(shutil.which('opencode') or 'NOT FOUND')"
 
 # Force sync slash commands to a specific guild (no gateway, no serve)
-python -m bot.sync_commands --guild <your guild id>
+python -m opencode_discord_bot.sync_commands --guild <your guild id>
 
 # Check the opencode server is reachable
 curl -u opencode:<your password> http://127.0.0.1:4096/global/health

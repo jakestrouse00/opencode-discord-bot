@@ -15,33 +15,177 @@ Discord Developer Portal steps to you.
 
 ```
 Install and set up the opencode-discord-bot project on my machine from
-scratch (a two-way Discord gateway for opencode; uses Pycord 2.8.1, NOT
-discord.py).
+scratch so I can run the Discord bot immediately with NO further
+configuration. This is a two-way Discord gateway for opencode; it uses
+Pycord 2.8.1, NOT discord.py. Work through every phase below in order — do
+NOT skip a phase or leave a decision unmade. For deep details on any step,
+read the named section of README.md / SETUP_GUIDE.md / AGENTS.md in the
+cloned repo, but this checklist is the authoritative sequence.
 
-1. Get the source code if I don't already have it:
-   `git clone https://github.com/jakestrouse00/opencode-discord-bot.git`
-   Then work from inside that cloned repo directory. (You can also pip
-   install it directly via
-   `pip install git+https://github.com/jakestrouse00/opencode-discord-bot.git`,
-   but clone it so you have README.md, SETUP_GUIDE.md, and AGENTS.md on
-   disk to read.)
+Phase 0 — Environment probe (you run these, report results before continuing):
+- OS (Windows / macOS / Linux) and shell.
+- `python --version` — must be 3.13+. If older, stop and tell me how to
+  install 3.13+ before proceeding.
+- `ffmpeg -version` — must be on PATH. If missing, install it
+  (`choco install ffmpeg` / `brew install ffmpeg` / `apt install ffmpeg`)
+  and re-check.
+- `opencode --version` (or `where opencode` / `which opencode`) — must be
+  on PATH. If missing, install it (`npm install -g opencode-ai` or from
+  https://opencode.ai) and re-check. The bot auto-spawns `opencode serve`.
+- GPU probe: run `nvidia-smi`. Record whether an NVIDIA GPU is present
+  (yes/no) and, if yes, its VRAM. This drives the CUDA decision in Phase 3
+  step 2. Non-NVIDIA GPUs are not supported by faster-whisper's CTranslate2
+  backend — treat them as "no GPU".
 
-2. For the full procedure, read these three files in the repo and follow
-   them in order: README.md -> SETUP_GUIDE.md -> AGENTS.md. They cover the
-   system deps (Python 3.13+, ffmpeg, opencode on PATH), the pip install
-   (`pip install -e .` from the clone, or the pip+git line above), the
-   Discord Developer Portal bot creation + invite + Message Content
-   intent, the .env file (DISCORD_BOT_TOKEN and OPENCODE_SERVER_PASSWORD
-   required), running, and syncing slash commands.
+Phase 1 — Source + install:
+- If I don't already have the source:
+  `git clone https://github.com/jakestrouse00/opencode-discord-bot.git`,
+  then `cd` into that cloned repo directory. (You can also
+  `pip install git+https://github.com/jakestrouse00/opencode-discord-bot.git`,
+  but clone it so README.md, SETUP_GUIDE.md, and AGENTS.md are on disk.)
+- Install the package editable from the clone: `pip install -e .`
+  This installs the `opencode_discord_bot` Python package + the
+  `opencode-discord-bot` console script. Do NOT install `discord.py`
+  alongside it — it conflicts with Pycord.
 
-3. Walk me through the manual Discord Developer Portal steps - do those
-   with me, not for me. Before finishing: verify the import
-   (`python -c "from opencode_discord_bot.commands import OpencodeBot; print('ok')"`),
-   sync slash commands once
-   (`python -m opencode_discord_bot.sync_commands --guild <guild id>`), and
-   do NOT leave the bot running in the foreground / blocking. Note
-   /oc_voice recording is currently broken (Pycord 2.8.1 + Discord DAVE
-   E2EE) - mention it but don't try to fix it.
+Phase 2 — Discord Developer Portal (MANUAL — walk me through these with me,
+NOT for me; pause after each step so I can do it in my browser):
+- Create a new application at https://discord.com/developers/applications
+  (or use an existing one).
+- Bot tab → Reset Token → copy the token. This is `DISCORD_BOT_TOKEN`.
+- Bot tab → Privileged Gateway Intents → enable **Message Content Intent**
+  → Save. Without it, plain-text follow-ups silently break.
+- OAuth2 → URL Generator → scopes `bot` + `applications.commands` →
+  permissions: Send Messages, Manage Channels (it creates session
+  channels), Read Message History (edits the "Working…" message), Connect
+  + Speak (for /oc_voice). Open the generated URL and invite the bot to
+  my server.
+- Get my server (guild) id: Discord Developer Mode (User Settings →
+  Advanced → Developer Mode), then right-click the server → Copy ID. This
+  is `DISCORD_BOT_GUILD_ID`.
+
+Phase 3 — Write `.env` (ask me before each decision, then write the file
+at `<repo>/.env`; the package reads `.env` from the cwd at launch). Order:
+1. Required keys: `DISCORD_BOT_TOKEN=<token>`,
+   `OPENCODE_SERVER_PASSWORD=opencode-local-dev` (any string; basic auth
+   for `opencode serve`), `DISCORD_BOT_GUILD_ID=<guild id from Phase 2>`.
+2. GPU / CUDA — only if Phase 0 found an NVIDIA GPU: ASK me whether to
+   configure the bot to use the GPU. If I say yes:
+   - Set `WHISPER_DEVICE=cuda` and `WHISPER_COMPUTE_TYPE=float16` (or
+     `int8_float16` if the GPU has low VRAM — ask me).
+   - Install CUDA 12 + cuBLAS + cuDNN 9 per SETUP_GUIDE.md "CUDA / GPU
+     deps" for my platform (Linux pip wheels + LD_LIBRARY_PATH export;
+     Windows: download the NVIDIA-libs archive from
+     Purfview/whisper-standalone-win and put the DLLs on PATH).
+   - Verify: `python -c "import ctranslate2; print('cuda devices:',
+     ctranslate2.get_cuda_device_count())"` must print >0. If it prints
+     0, the CUDA libs aren't found — re-check LD_LIBRARY_PATH (Linux) /
+     PATH (Windows) before continuing; do NOT leave it at 0.
+   If I say no (or no GPU), leave `WHISPER_DEVICE=cpu` and
+   `WHISPER_COMPUTE_TYPE=int8` (the defaults).
+3. Voice / STT / TTS — ASK: which STT provider? `local` (faster-whisper,
+   default, no cloud API, no key) / `openai` (cloud, needs OPENAI_API_KEY)
+   / `auto` (local first, cloud fallback). Set `VOICE_STT_PROVIDER`. Then
+   ask the local model size if local/auto: `tiny`/`base`/`small`/`medium`
+   /`large` → set `VOICE_LOCAL_WHISPER_MODEL` and `WHISPER_MODEL`. Then
+   ask whether TTS (bot speaks responses in voice channels) should be
+   on. If yes, set `VOICE_TTS_ENABLED=true` and ask for `OPENAI_API_KEY`
+   (TTS uses OpenAI's cloud TTS). If no, set `VOICE_TTS_ENABLED=false`
+   and leave `OPENAI_API_KEY` empty.
+4. Ollama / slug — ASK whether to enable LLM-generated channel-name slugs.
+   If yes, ask for `OLLAMA_AUTH_KEY` (get it at https://ollama.com) and
+   set `OLLAMA_API_URL=https://ollama.com/v1` (default) and
+   `SLUG_MODEL=gpt-oss:20b-cloud` (default). If no, leave
+   `OLLAMA_AUTH_KEY` empty — slugs silently degrade to a regex-only
+   fallback and the bot still works.
+5. Model overrides (optional) — ASK whether to override the opencode model
+   per path. If yes, set `OPENCODE_DEFAULT_MODEL=<id>` (for /oc + plain-text
+   follow-ups, agent=None) and/or `OPENCODE_PLAN_AUTHOR_MODEL=<id>` (for
+   /oc_plan, /oc_voice, /oc_talk, voice-message trigger, Comulytic
+   bridge; all agent="plan-author"). Empty = each opencode agent's own
+   frontmatter `model:` wins (the default). Model ids are
+   provider-scoped, e.g. `ollama-cloud/glm-5.2`, `anthropic/claude-sonnet-4`.
+6. `OPENCODE_SERVE_CWD` — find the project the bot will run against: the
+   directory containing the target project's `.opencode/` (plans, agents,
+   config). If that directory is the SAME as the repo root you're in,
+   leave `OPENCODE_SERVE_CWD` empty (default = bot launch dir). If it's a
+   DIFFERENT directory (e.g. the bot's .env lives in a subdirectory but
+   the .opencode/ lives at a parent project root), set
+   `OPENCODE_SERVE_CWD=<absolute path to that project root>`. Getting this
+   wrong causes the "silent plan-loss bug" (sessions resolve to the
+   subdir and can't find plans/agents) — see AGENTS.md "OpencodeServe".
+7. Comulytic bridge (optional) — ASK whether to enable the Comulytic
+   cloud bridge (polls Comulytic for Note Pro recordings, transcribes
+   locally via faster-whisper, routes to plan-author). If yes, walk me
+   through JWT capture per SETUP_GUIDE.md "Comulytic bridge → Capture the
+   JWT + refresh token" (sign in at web.comulytic.ai, DevTools Network,
+   copy `data.accessToken` and `data.refreshToken` from the login
+   response). Set `COMULYTIC_ENABLED=true`,
+   `COMULYTIC_JWT=<access token>`,
+   `COMULYTIC_REFRESH_TOKEN=<refresh token>`. The bridge auto-spawns
+   in-process when the bot starts with these set — no separate launch.
+   If no, leave `COMULYTIC_ENABLED` unset/false (silent no-op).
+
+Phase 4 — Install the bundled `plan-author` opencode agent into the
+TARGET project (the same directory you set as `OPENCODE_SERVE_CWD`, or
+the repo root if you left it empty):
+`python -m opencode_discord_bot.install_agent --dest <that project root>`
+The bot's /oc_plan, /oc_voice, /oc_talk, voice-message trigger, and
+Comulytic-bridge paths route to opencode's `plan-author` agent, which is
+NOT built into opencode — this package ships a generic copy. Without
+this install those paths 404. Use `--force` only if overwriting an
+existing customized plan-author.md is intended.
+
+Phase 5 — Sync slash commands to my guild (one-shot; the bot does NOT
+auto-sync on startup):
+`python -m opencode_discord_bot.sync_commands --guild <guild id>`
+This pushes the slash-command surface — including /oc_setup — to my
+guild so they appear in Discord. Run it from the repo root (where .env
+lives) so it reads the token + guild id.
+
+Phase 6 — I run the bot + /oc_setup (YOU do NOT run the bot — it
+auto-spawns `opencode serve` and outlives your shell, leaving zombie
+processes and blocking the port; see AGENTS.md "Do NOT run the bot from
+agent context"). Tell me to:
+1. Open a separate terminal in the repo root.
+2. `python -m opencode_discord_bot` — the gateway starts and
+   `opencode serve` is spawned as a child process.
+3. In Discord, invoke `/oc_setup` in my server. It creates a category
+   "OpenCode Sessions" plus two text channels (`voice-recordings` →
+   VOICE_MESSAGE_TRIGGER_CHANNEL_ID, `bot-commands` →
+   DISCORD_BOT_ALLOWED_CHANNEL_IDS), writes their IDs + the guild id to
+   .env, and reloads config live. Requires the Manage Channels permission.
+   Only runs once per guild (refuses if any guild-specific field is
+   already set).
+4. Stop the bot (Ctrl-C), then re-run
+   `python -m opencode_discord_bot.sync_commands --guild <guild id>` so
+   every command (now that /oc_setup has written the guild config) is
+   registered. Then restart the bot for normal use.
+Do NOT leave the bot running in the foreground / blocking your shell.
+
+Phase 7 — Verification (you run these; do not start the gateway):
+- `python -c "from opencode_discord_bot.commands import OpencodeBot; print('ok')"`
+- `ffmpeg -version`
+- `python -c "import faster_whisper; print('ok')"` (skip only if I chose
+  cloud-only STT, i.e. VOICE_STT_PROVIDER=openai with no auto fallback).
+- Only if WHISPER_DEVICE=cuda:
+  `python -c "import ctranslate2; print(ctranslate2.get_cuda_device_count())"`
+  must print >0; 0 = CUDA libs missing (re-check Phase 3 step 2).
+- `python -c "from opencode_discord_bot.config import config; print('set' if config.discord_bot_token else 'EMPTY')"`
+  must print `set`.
+- Then I will do the live smoke test in Discord: `/oc hello` should
+  create a channel and respond. (You cannot do this part — it's a live
+  gateway interaction.)
+
+Notes:
+- /oc_voice recording is currently broken (Pycord 2.8.1 + Discord DAVE
+  E2EE on modern voice channels). Mention it but do NOT try to fix it.
+  TTS, STT, session-routing, and text commands are unaffected.
+- Slash commands are NOT auto-synced on startup (auto_sync_commands=False
+  to avoid duplicate UI entries). Sync via `sync_commands --guild <id>`
+  after any change to the command surface.
+- No tests, linter, or type-checker are configured; the import check
+  above is the only automated sanity check.
 ```
 
 ## Quick Start

@@ -54,6 +54,29 @@ This installs the `opencode_discord_bot` Python package and a
   child process on login). Install via `npm install -g opencode-ai` or
   download the binary from https://opencode.ai.
 
+### GPU / CUDA (optional, faster local STT)
+
+The default `WHISPER_DEVICE=cpu` needs none of this — skip ahead. Only
+required when you set `WHISPER_DEVICE=cuda` to run faster-whisper on an
+NVIDIA GPU (significant speedup for `medium`/`large` models). Probe with
+`nvidia-smi`; non-NVIDIA GPUs are not supported by the CTranslate2 backend.
+
+You need **CUDA 12.x** + **cuBLAS** + **cuDNN 9** (the shared runtime
+libraries, NOT `nvcc`). Pair `WHISPER_DEVICE=cuda` with a GPU compute type:
+`WHISPER_COMPUTE_TYPE=float16` (fastest, full GPU) or `int8_float16`
+(lower VRAM, slightly slower). The CPU default `int8` is suboptimal on
+`cuda`.
+
+Install per platform — see `SETUP_GUIDE.md` "CUDA / GPU deps" for the
+exact commands:
+- **Linux (pip — easiest):** `pip install nvidia-cublas-cu12 nvidia-cudnn-cu12==9.*` + export `LD_LIBRARY_PATH` to the two lib dirs (must be set in the shell you launch the bot from).
+- **Windows:** the pip wheels do NOT ship CUDA DLLs. Download the NVIDIA-libs archive from
+  [Purfview/whisper-standalone-win](https://github.com/Purfview/whisper-standalone-win/releases/tag/libs)
+  and place the extracted DLLs on `PATH`.
+- **Docker:** base on `nvidia/cuda:12.3.2-cudnn9-runtime-ubuntu22.04` + the NVIDIA Container Toolkit.
+
+Verify the GPU is visible: `python -c "import ctranslate2; print('cuda devices:', ctranslate2.get_cuda_device_count())"` — must print >0. `0` = the CUDA libs aren't found; re-check `LD_LIBRARY_PATH` (Linux) / `PATH` (Windows). If stuck on older CUDA/cuDNN, pin a compatible CTranslate2 (CUDA 12 + cuDNN 8 → `ctranslate2==4.4.0`; CUDA 11 + cuDNN 8 → `ctranslate2==3.24.0`).
+
 ## Required environment variables
 
 | Variable | Required? | Description |
@@ -97,16 +120,73 @@ details and the `--force` flag.
 export DISCORD_BOT_TOKEN=<your token>
 export OPENCODE_SERVER_PASSWORD=opencode-local-dev
 
-# Run the bot (it auto-spawns `opencode serve` on login)
+# 1. Sync slash commands to your guild (one-shot; the bot does NOT auto-sync
+#    on startup — auto_sync_commands=False). Required BEFORE /oc_setup will
+#    appear in Discord.
+python -m opencode_discord_bot.sync_commands --guild <your guild id>
+
+# 2. Run the bot (it auto-spawns `opencode serve` on login)
 python -m opencode_discord_bot
 
 # Or use the console script
 opencode-discord-bot
+
+# 3. After /oc_setup writes the guild config (see below), stop the bot and
+#    re-sync so every command is registered, then restart:
+python -m opencode_discord_bot.sync_commands --guild <your guild id>
 ```
 
 The bot starts the Discord gateway, auto-spawns `opencode serve` as a child
 process (unless `OPENCODE_SERVE_ENABLED=false`), and registers slash commands
 to the configured guild (or globally if `DISCORD_BOT_GUILD_ID=0`).
+
+### Guild setup via `/oc_setup`
+
+After the bot is running and the command surface is synced, invoke
+`/oc_setup` in your server (requires the **Manage Channels** permission). It
+does the guild-specific Discord setup for you in one click:
+
+1. Creates a category **"OpenCode Sessions"** in the invoking guild.
+2. Creates two text channels at the guild root (so `/oc_cleanup` won't
+   wipe them): `voice-recordings` (→ `VOICE_MESSAGE_TRIGGER_CHANNEL_ID`)
+   and `bot-commands` (→ `DISCORD_BOT_ALLOWED_CHANNEL_IDS`).
+3. Writes the three created IDs + the guild id to `.env` atomically and
+   reloads config live.
+4. Refuses to run twice — if any of those three guild-specific fields is
+   already set, it replies "already set up" and does nothing (clear them
+   in `.env` manually to re-run).
+
+After `/oc_setup`: stop the bot (Ctrl-C), re-run
+`python -m opencode_discord_bot.sync_commands --guild <guild id>` so every
+command is registered now that the guild config is written, then restart
+the bot for normal use. See `SETUP_GUIDE.md` "/oc_setup — one-time guild
+setup" for the full details.
+
+## Comulytic bridge (optional, polling-based)
+
+The Comulytic bridge routes Comulytic Note Pro recordings to opencode's
+`plan-author` agent — polls Comulytic's cloud API for new recordings,
+downloads each recording's audio, transcribes it LOCALLY via
+faster-whisper (the same pipeline `/oc_talk` uses), and posts the
+plan-author conversation to a Discord channel (when
+`DISCORD_BOT_TOKEN` + `DISCORD_BOT_GUILD_ID` are set). It's disabled by
+default and auto-spawns in-process when the bot starts with
+`COMULYTIC_ENABLED=true` + `COMULYTIC_JWT` set — no separate launch
+needed.
+
+To enable it, set in `.env`:
+```
+COMULYTIC_ENABLED=true
+COMULYTIC_JWT=<150-day access JWT captured from a login at web.comulytic.ai>
+COMULYTIC_REFRESH_TOKEN=<365-day refresh JWT captured alongside it>
+```
+
+Capturing the JWT requires a browser DevTools Network capture of the
+login exchange (the JWT is HS256, server-signed — the bridge cannot
+self-sign it). See `SETUP_GUIDE.md` "Comulytic bridge → Capture the JWT
++ refresh token" for the exact steps. The standalone console script
+`comulytic-bridge` (or `python -m opencode_discord_bot.bridge`) is a
+manual override for running the bridge out-of-process.
 
 ## /oc_voice recording (broken)
 
