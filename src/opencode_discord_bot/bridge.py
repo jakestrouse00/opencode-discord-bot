@@ -483,7 +483,16 @@ async def poll_once(
 
     # Filter to audio-delivered; non-delivered new ones are already in seen
     # (added above) and will be re-checked next cycle for delivery.
-    delivered = [nid for nid in new_ids if _is_note_audio_delivered(comulytic, nid)]
+    # NOTE: `_is_note_audio_delivered` is async; awaiting it inline inside
+    # the list-comprehension predicate would just build coroutine objects
+    # (which are always truthy), so every recording would look "delivered"
+    # and we'd never actually filter. Gather the awaits concurrently
+    # instead — each note_id is unique so the per-note paging-cache `pop`s
+    # hit distinct keys.
+    delivery_flags = await asyncio.gather(
+        *[_is_note_audio_delivered(comulytic, nid) for nid in new_ids]
+    )
+    delivered = [nid for nid, ok in zip(new_ids, delivery_flags) if ok]
     _log.info(
         "%d new recording(s) audio-delivered; %d not yet delivered (will re-check next cycle)",
         len(delivered),

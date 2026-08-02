@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 from collections.abc import AsyncGenerator
@@ -38,6 +39,8 @@ from typing import Any
 import httpx
 
 from opencode_discord_bot.config import config
+
+_log = logging.getLogger("bot.opencode_client")
 
 
 def _auth() -> tuple[str, str] | None:
@@ -231,20 +234,57 @@ class OpencodeClient:
     def _resolve_model(self, agent: str | None) -> str | None:
         """Pick the model to send for a prompt, based on the agent + config.
 
-        Returns the configured override model id (non-empty) for the agent, or
-        None to let the opencode server fall back to the agent's frontmatter
-        ``model:`` field (the historical behavior when both overrides are
-        empty). Two separate config fields cover the two agent surfaces the
-        bot uses: ``opencode_default_model`` for ``agent=None`` (``/oc`` +
-        plain-text follow-ups) and ``opencode_plan_author_model`` for
-        ``agent="plan-author"`` (``/oc_plan`` / ``/oc_voice`` / ``/oc_talk`` /
-        voice-message trigger / Comulytic bridge). Other agent names (custom
-        agents, if any) fall under the default field too — there's no
-        per-agent override beyond these two.
+        Returns the configured override model id (non-empty) for the agent as
+        a ``"providerID/modelID"`` string, or None to let the opencode server
+        fall back to the agent's frontmatter ``model:`` field (the historical
+        behavior when both overrides are empty). Two separate config fields
+        cover the two agent surfaces the bot uses: ``opencode_default_model``
+        for ``agent=None`` (``/oc`` + plain-text follow-ups) and
+        ``opencode_plan_author_model`` for ``agent="plan-author"``
+        (``/oc_plan`` / ``/oc_voice`` / ``/oc_talk`` / voice-message trigger /
+        Comulytic bridge). Other agent names (custom agents, if any) fall
+        under the default field too — there's no per-agent override beyond
+        these two.
+
+        The returned string is NOT sent on the wire as-is: ``send_message``
+        and ``send_prompt_async`` pass it through ``_model_ref`` to build the
+        ``{"providerID", "modelID"}`` object the opencode server's
+        ``PromptInput.model`` field requires (a string is rejected with HTTP
+        400 ``Expected object | null, got "..." at ["model"]``). The config
+        format stays as the convenient ``"providerID/modelID"`` string; the
+        split is an internal detail of this client.
         """
         if agent == "plan-author":
             return config.opencode_plan_author_model or None
         return config.opencode_default_model or None
+
+    @staticmethod
+    def _model_ref(model_id: str | None) -> dict | None:
+        """Convert a ``"providerID/modelID"`` config string to the
+        ``{"providerID": ..., "modelID": ...}`` object the opencode server's
+        ``prompt_async`` / ``message`` endpoints require (the server's
+        ``PromptInput.model`` field is ``optional(ModelRef)`` — an object or
+        absent — NOT a string).
+
+        Returns ``None`` for empty/None so the caller omits the key entirely
+        and the server falls back to the agent's frontmatter ``model:`` field.
+        If the string has no ``/``, logs a warning and returns ``None`` (a
+        valid ``ModelRef`` needs both parts; falling back to the agent's
+        frontmatter model is safer than sending a malformed object that 400s).
+        Splits on the FIRST ``/`` only so a model id containing ``/`` is
+        preserved.
+        """
+        if not model_id:
+            return None
+        if "/" not in model_id:
+            _log.warning(
+                "model %r has no '/' — can't build ModelRef {providerID, "
+                "modelID}; omitting model so the agent frontmatter model wins",
+                model_id,
+            )
+            return None
+        provider_id, _, model_id_part = model_id.partition("/")
+        return {"providerID": provider_id, "modelID": model_id_part}
 
     async def send_message(
         self,
@@ -263,14 +303,18 @@ class OpencodeClient:
         ``model is None`` (the common case — callers don't pass it), it's
         resolved from config via ``_resolve_model`` so the bot's
         ``OPENCODE_DEFAULT_MODEL`` / ``OPENCODE_PLAN_AUTHOR_MODEL`` env vars
-        flow through transparently.
+        flow through transparently. The resolved ``"providerID/modelID"``
+        string is converted to the ``{"providerID", "modelID"}`` object the
+        opencode server expects (see ``_model_ref``); the ``model`` key is
+        omitted when no override is configured.
         """
         body: dict = {"parts": parts}
         if agent is not None:
             body["agent"] = agent
         resolved_model = model if model is not None else self._resolve_model(agent)
-        if resolved_model:
-            body["model"] = resolved_model
+        model_ref = self._model_ref(resolved_model)
+        if model_ref is not None:
+            body["model"] = model_ref
         return await self._request("POST", f"/session/{sid}/message", json=body)
 
     async def send_prompt_async(
@@ -290,14 +334,18 @@ class OpencodeClient:
         ``model is None`` (the common case — callers don't pass it), it's
         resolved from config via ``_resolve_model`` so the bot's
         ``OPENCODE_DEFAULT_MODEL`` / ``OPENCODE_PLAN_AUTHOR_MODEL`` env vars
-        flow through transparently.
+        flow through transparently. The resolved ``"providerID/modelID"``
+        string is converted to the ``{"providerID", "modelID"}`` object the
+        opencode server expects (see ``_model_ref``); the ``model`` key is
+        omitted when no override is configured.
         """
         body: dict = {"parts": parts}
         if agent is not None:
             body["agent"] = agent
         resolved_model = model if model is not None else self._resolve_model(agent)
-        if resolved_model:
-            body["model"] = resolved_model
+        model_ref = self._model_ref(resolved_model)
+        if model_ref is not None:
+            body["model"] = model_ref
         await self._request("POST", f"/session/{sid}/prompt_async", json=body)
 
     # --- questions ---

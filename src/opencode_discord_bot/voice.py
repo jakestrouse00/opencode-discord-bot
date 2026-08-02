@@ -30,6 +30,7 @@ import asyncio
 import io
 import logging
 import os
+import sys
 import tempfile
 import time
 import warnings
@@ -100,6 +101,52 @@ def _openai_client():
     return AsyncOpenAI(api_key=config.openai_api_key)
 
 
+def _register_cuda_dll_dirs():
+    """Register the `nvidia-*` CUDA 12 + cuDNN 9 wheel `bin/` dirs with the
+    Windows DLL loader so CTranslate2 can find `cublas64_12.dll` etc. on GPU.
+
+    CTranslate2 4.8.1's `__init__` only `os.add_dll_directory()`-registers its
+    OWN package dir (where it bundles `cudnn64_9.dll` + `libiomp5md.dll`). The
+    CUDA 12 runtime + cuDNN companion DLLs ship via the `nvidia-cublas-cu12` /
+    `nvidia-cuda-runtime-cu12` / `nvidia-cuda-nvrtc-cu12` / `nvidia-cufft-cu12`
+    / `nvidia-cudnn-cu12` / `nvidia-nvjitlink-cu12` wheels under
+    `site-packages/nvidia/<lib>/bin/`, and CT2 does NOT register those — so
+    `cublas64_12.dll` (and friends) fail to load on GPU. This registers them
+    once per process. No-op on non-Windows, on CPU device, or when the wheels
+    aren't installed (the dirs just don't exist and we skip silently).
+
+    `os.add_dll_directory()` alone is NOT sufficient: CTranslate2's loader
+    (and/or its transitive DLL dependencies) falls back to the legacy `PATH`
+    search for some of the companion libs, so `cublas64_12.dll` still fails
+    to load at `model.encode` time even when its dir is registered. Prepending
+    each `bin/` to `PATH` makes both lookup mechanisms work. (Verified
+    empirically: model *construction* succeeds either way, but the first
+    `model.transcribe` raises `cublas64_12.dll not found` until `PATH` is
+    updated — `add_dll_directory` + retained handles did not fix it.)
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import importlib.util
+
+        nvidia_init = importlib.util.find_spec("nvidia")
+        if nvidia_init is None or nvidia_init.submodule_search_locations is None:
+            return
+        nvidia_root = list(nvidia_init.submodule_search_locations)[0]
+    except (ValueError, ModuleNotFoundError):
+        return
+    for entry in os.listdir(nvidia_root):
+        bin_dir = os.path.join(nvidia_root, entry, "bin")
+        if os.path.isdir(bin_dir):
+            try:
+                os.add_dll_directory(bin_dir)
+            except (FileNotFoundError, OSError):
+                pass
+            # Legacy PATH fallback — see docstring for why add_dll_directory
+            # alone is insufficient for CTranslate2's cublas lookup.
+            os.environ["PATH"] = bin_dir + os.pathsep + os.environ.get("PATH", "")
+
+
 def _construct_local_whisper():
     """Synchronously construct the faster-whisper model (heavy, ~140MB+).
 
@@ -108,6 +155,8 @@ def _construct_local_whisper():
     multi-second model load and must NOT be called on the event loop — wrap
     the call site in `asyncio.to_thread`.
     """
+    if config.whisper_device == "cuda":
+        _register_cuda_dll_dirs()
     try:
         from faster_whisper import WhisperModel
     except ImportError as e:

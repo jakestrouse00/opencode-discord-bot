@@ -47,6 +47,10 @@ client), `pydantic-settings` (config), `PyNaCl` (voice crypto),
 (local STT — used by `/oc_voice`, `/oc_talk`, voice messages, AND the
 Comulytic bridge), `openai` (TTS + cloud STT fallback).
 
+The `faster-whisper` + `ctranslate2` wheels are CPU-only by default; to run
+on an NVIDIA GPU (`WHISPER_DEVICE=cuda`) you also need CUDA 12 + cuBLAS +
+cuDNN 9 — see "CUDA / GPU deps" below.
+
 ### ffmpeg (system dependency — NOT pip-installable)
 `ffmpeg` must be on your `PATH`. The bot uses it for:
 - `/oc_voice` audio extraction (converts recorded WAV chunks for Whisper).
@@ -60,6 +64,61 @@ Install via:
 - **Linux:** `apt install ffmpeg` / `dnf install ffmpeg` / etc.
 
 Verify: `ffmpeg -version`
+
+### CUDA / GPU deps (only if `WHISPER_DEVICE=cuda`)
+The default `WHISPER_DEVICE=cpu` needs **none** of this — skip ahead. This is
+only required when you set `WHISPER_DEVICE=cuda` to run faster-whisper on an
+NVIDIA GPU.
+
+`faster-whisper` runs on CTranslate2, and the bot pins `ctranslate2>=4.0.0`
+(see `pyproject.toml`). The latest CTranslate2 wheels require **CUDA 12.x**
++ **cuDNN 9** (Whisper has convolutional layers, so cuDNN is required — not
+just cuBLAS). Specifically:
+- **CUDA 12.x** runtime (you need the shared libraries, NOT `nvcc` — the bot
+  only runs models, it doesn't compile them).
+- **cuBLAS for CUDA 12**.
+- **cuDNN 9 for CUDA 12**.
+
+Version-pin note: the latest `ctranslate2` supports **only** CUDA 12 + cuDNN
+9. If you're stuck on older CUDA/cuDNN, pin a compatible CTranslate2:
+- CUDA 12 + cuDNN 8 → `pip install --force-reinstall ctranslate2==4.4.0`
+- CUDA 11 + cuDNN 8 → `pip install --force-reinstall ctranslate2==3.24.0`
+
+Install the NVIDIA libraries per platform:
+
+- **Linux (pip — easiest):**
+  ```bash
+  pip install nvidia-cublas-cu12 nvidia-cudnn-cu12==9.*
+  export LD_LIBRARY_PATH=`python3 -c 'import os; import nvidia.cublas.lib; import nvidia.cudnn.lib; print(os.path.dirname(nvidia.cublas.lib.__file__) + ":" + os.path.dirname(nvidia.cudnn.lib.__file__))'`
+  ```
+  The `LD_LIBRARY_PATH` export must be set in the shell you launch the bot
+  from (add it to your shell profile or a wrapper script). Without it,
+  CTranslate2 won't find the cuBLAS/cuDNN `.so`s at runtime even though pip
+  installed them.
+
+- **Windows:** the pip wheels do **not** ship CUDA DLLs. Download the
+  NVIDIA-libs archive from
+  [Purfview/whisper-standalone-win](https://github.com/Purfview/whisper-standalone-win/releases/tag/libs)
+  and place the extracted DLLs in a directory on your `PATH`. (The Visual
+  C++ runtime is also required — it's installed on most systems already.)
+
+- **Docker:** base your image on
+  `nvidia/cuda:12.3.2-cudnn9-runtime-ubuntu22.04` (cuBLAS + cuDNN baked in)
+  and run with the
+  [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/overview.html)
+  so the container can see the host GPU.
+
+Pair `WHISPER_DEVICE=cuda` with a GPU compute type in `.env` (see
+`.env.example` ~lines 108-116): `WHISPER_COMPUTE_TYPE=float16` (fastest, full
+GPU) or `int8_float16` (lower VRAM, slightly slower — good for mid-range
+GPUs). The CPU default `int8` is suboptimal on `cuda`.
+
+Verify the GPU is visible to CTranslate2:
+```bash
+python -c "import ctranslate2; print('cuda devices:', ctranslate2.get_cuda_device_count())"
+```
+Should print `cuda devices: 1` (or more). `0` means the CUDA/cuBLAS/cuDNN
+libs aren't found — re-check `LD_LIBRARY_PATH` (Linux) or `PATH` (Windows).
 
 ## Secrets & Configuration to Collect
 
@@ -263,6 +322,11 @@ After setup, verify each piece:
 - [ ] `ffmpeg -version` — ffmpeg is on PATH.
 - [ ] `python -c "import faster_whisper; print('ok')"` — local STT dep
   installed (skip if you'll only use cloud STT).
+- [ ] (Only if `WHISPER_DEVICE=cuda`)
+  `python -c "import ctranslate2; print(ctranslate2.get_cuda_device_count())"`
+  — prints >0 when CUDA 12 + cuBLAS + cuDNN 9 are found; 0 = libs missing
+  (re-check `LD_LIBRARY_PATH` on Linux / `PATH` on Windows; see "CUDA / GPU
+  deps" above).
 - [ ] `python -m bot` starts without error and logs "Starting opencode Discord
   bot".
 - [ ] `/oc hello` in Discord creates a channel and responds.

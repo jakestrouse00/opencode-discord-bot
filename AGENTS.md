@@ -28,16 +28,22 @@ control bot.
   `python -m opencode_discord_bot.install_agent` (from the target project's
   root, or `--dest <project root>`) to install it. See `SETUP_GUIDE.md`
   "Install the plan-author agent" for details.
-- **Run:** `python -m opencode_discord_bot` (or `opencode-discord-bot`). The
-  bot starts the Discord gateway, auto-spawns `opencode serve` as a child
-  process (unless `OPENCODE_SERVE_ENABLED=false`). **Slash commands are NOT
-  auto-synced on startup** — `auto_sync_commands=False` is set in
-  `OpencodeBot.__init__` to prevent Pycord's `on_connect` from pushing a
-  global copy of every command on every login (which, combined with the
-  guild-scoped commands pushed by `sync_commands.py`, produced duplicate
-  entries in the Discord UI). Sync commands explicitly via
+- **Do NOT run the bot from agent context.** `python -m opencode_discord_bot`
+  (or `opencode-discord-bot`) starts the Discord gateway AND auto-spawns
+  `opencode serve` as a child process (unless `OPENCODE_SERVE_ENABLED=false`).
+  Both outlive the agent's bash-tool command and keep running with no TUI to
+  stop them, which blocks the next session from binding the port and leaves
+  zombie processes. The bot is meant to be launched manually by a human in
+  its own terminal, not by an agent. For verification, use the import check
+  in the "No tests..." bullet below — never launch the gateway.
+- **Slash commands are NOT auto-synced on startup** — `auto_sync_commands=False`
+  is set in `OpencodeBot.__init__` to prevent Pycord's `on_connect` from
+  pushing a global copy of every command on every login (which, combined
+  with the guild-scoped commands pushed by `sync_commands.py`, produced
+  duplicate entries in the Discord UI). Sync commands explicitly via
   `python -m opencode_discord_bot.sync_commands --guild <id>` after any
-  change to the slash-command surface.
+  change to the slash-command surface — this is a one-shot sync a human
+  runs manually, NOT something an agent should invoke.
 - **Privileged intent:** the **Message Content** gateway intent MUST be
   enabled in the Discord Developer Portal (Bot -> Privileged Gateway Intents)
   for plain-text follow-ups to work. The bot sets `intents.message_content =
