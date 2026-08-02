@@ -1,24 +1,25 @@
 """Standalone settings for the opencode Discord control bot.
 
-`BotConfig` holds ONLY the fields the bot package (`bot/`) reads, decoupled
-from `core.settings.ExecutionSettings` so the bot can be imported, installed,
-and run without dragging the orchestrator's `core/` package along (which
-carries 20+ unrelated orchestrator settings: Ollama keys, Langfuse config,
-GUI toggles, image-gen keys, etc.).
+`BotConfig` holds ONLY the fields the bot package (`opencode_discord_bot/`)
+reads, decoupled from `core.settings.ExecutionSettings` so the bot can be
+imported, installed, and run without dragging the orchestrator's `core/`
+package along (which carries 20+ unrelated orchestrator settings: Ollama
+keys, Langfuse config, GUI toggles, image-gen keys, etc.).
 
 All defaults are empty strings / safe defaults — NO committed secrets. The
 user sets them via env vars (uppercase, auto-mapped by pydantic-settings) or
-a `.env` file in the working directory. See `bot/.env.example` for a
-template.
+a `.env` file in the working directory. See `.env.example` (at the repo
+root) for a template.
 
 Env-var overrides (uppercase of the field name):
   DISCORD_BOT_TOKEN / DISCORD_BOT_GUILD_ID / DISCORD_BOT_ALLOWED_CHANNEL_IDS
   / DISCORD_BOT_SESSION_CATEGORY_ID
-  OPENCODE_SERVER_URL / OPENCODE_SERVER_PASSWORD / OPENCODE_SERVE_ENABLED
-  / OPENCODE_SERVE_PORT / OPENCODE_SERVE_HOSTNAME / OPENCODE_SERVE_CORS
-   / OPENCODE_SERVE_STARTUP_TIMEOUT / OPENCODE_SERVE_CWD
-   OPENCODE_DEFAULT_MODEL / OPENCODE_PLAN_AUTHOR_MODEL
-   VOICE_MESSAGE_ENABLED / VOICE_MESSAGE_TRIGGER_CHANNEL_ID
+  OPENCODE_SERVER_URL / OPENCODE_SERVER_PASSWORD / OPENCODE_SERVER_USERNAME
+  / OPENCODE_SERVE_ENABLED / OPENCODE_SERVE_PORT / OPENCODE_SERVE_HOSTNAME
+  / OPENCODE_SERVE_CORS / OPENCODE_SERVE_STARTUP_TIMEOUT / OPENCODE_SERVE_CWD
+  / OC_SINGLETON_LOCK
+  OPENCODE_DEFAULT_MODEL / OPENCODE_PLAN_AUTHOR_MODEL
+  VOICE_MESSAGE_ENABLED / VOICE_MESSAGE_TRIGGER_CHANNEL_ID
   / VOICE_SILENCE_TIMEOUT_SECONDS / VOICE_CHUNK_SECONDS / VOICE_STT_PROVIDER
   / VOICE_STT_MODEL / VOICE_LOCAL_WHISPER_MODEL / VOICE_TTS_ENABLED
   / VOICE_TTS_MODEL / VOICE_TTS_VOICE / VOICE_TTS_SPEED
@@ -28,10 +29,11 @@ Env-var overrides (uppercase of the field name):
   COMULYTIC_ENABLED / COMULYTIC_JWT / COMULYTIC_REFRESH_TOKEN
   / COMULYTIC_API_BASE / COMULYTIC_WEB_BASE / COMULYTIC_AUDIO_PATH
   / COMULYTIC_POLL_INTERVAL_SECONDS / COMULYTIC_POLL_PAGE_SIZE
-   / COMULYTIC_USER_AGENT / COMULYTIC_PLAN_TYPE / COMULYTIC_RELOGIN_WARN_DAYS
-   / COMULYTIC_STATE_FILE / COMULYTIC_DISCORD_POINTER_CHANNEL_ID
-   / COMULYTIC_QUESTION_TIMEOUT_SECONDS
-   / COMULYTIC_QUESTION_POLL_INTERVAL_SECONDS
+  / COMULYTIC_USER_AGENT / COMULYTIC_PLAN_TYPE / COMULYTIC_RELOGIN_WARN_DAYS
+  / COMULYTIC_STATE_FILE / COMULYTIC_DISCORD_POINTER_CHANNEL_ID
+  / COMULYTIC_QUESTION_TIMEOUT_SECONDS / COMULYTIC_QUESTION_POLL_INTERVAL_SECONDS
+  / COMULYTIC_MAX_DURATION_HOURS / COMULYTIC_MAX_DURATION_MINUTES
+  / COMULYTIC_MAX_DURATION_SECONDS
 """
 
 from __future__ import annotations
@@ -47,7 +49,7 @@ class BotConfig(BaseSettings):
     faster-whisper, OpenAI (TTS), slug LLM. All defaults are safe/empty so
     the bot starts without configuration (and exits cleanly with a clear
     message if a required value like `discord_bot_token` is missing — see
-    `bot/__main__.py`).
+    `opencode_discord_bot/__main__.py`).
     """
 
     model_config = SettingsConfigDict(env_prefix="", env_file=".env")
@@ -64,6 +66,12 @@ class BotConfig(BaseSettings):
     # --- opencode serve lifecycle ---
     opencode_server_url: str = "http://127.0.0.1:4096"
     opencode_server_password: str = ""
+    # Basic-auth username sent to the opencode server (the server always
+    # expects "opencode"; exposed for non-default server configs and to keep
+    # the client + .env in sync rather than hardcoding a magic string in
+    # `opencode_client._auth`). Read by `OpencodeClient._auth()` when
+    # `opencode_server_password` is set.
+    opencode_server_username: str = "opencode"
     opencode_serve_enabled: bool = True
     opencode_serve_port: int = 4096
     opencode_serve_hostname: str = "127.0.0.1"
@@ -78,6 +86,14 @@ class BotConfig(BaseSettings):
     # (opencode's defaultDirectory resolver falls back to process.cwd() when
     # no ?directory= query / x-opencode-directory header is on the request).
     opencode_serve_cwd: str = ""
+
+    # --- singleton lock (single-instance enforcement) ---
+    # Absolute path to the OS file lock that prevents a second bot process
+    # from racing the Discord gateway. Empty = `.opencode-discord-bot.lock`
+    # in the launch cwd. Override for non-standard launch dirs (e.g. when
+    # multiple bots share a cwd but must not race each other). Read by
+    # `SingletonLock.acquire_or_raise`.
+    oc_singleton_lock: str = ""
 
     # --- model overrides (optional) ---
     # When non-empty, the bot sends this model in the prompt body for every
@@ -201,7 +217,7 @@ class BotConfig(BaseSettings):
     comulytic_user_agent: str = ""
     # Directive sent to plan-author: "" (let plan-author classify) |
     # "actionable" | "note". Mirrors the [PLAN_TYPE_PRESELECTED] directive
-    # from bot/commands.py.
+    # from opencode_discord_bot/commands.py.
     comulytic_plan_type: str = ""
     # Warn N days before JWT exp (logged on startup + each poll cycle if
     # close). The consolidated report recommends proactive refresh at exp-24h
@@ -228,11 +244,23 @@ class BotConfig(BaseSettings):
     # plan-author session is running. Matches the main bot's 2.0s cadence.
     comulytic_question_poll_interval_seconds: float = 2.0
 
+    # --- Comulytic bridge: max-recording-duration cap ---
+    # Recordings longer than (hours + minutes + seconds) are marked as seen
+    # but NOT transcribed — skips both WAV conversion and the expensive local
+    # Whisper STT pass. Guards against accidental recordings (e.g. a recorder
+    # left on for hours) being processed. The recording is still downloaded
+    # (cheap relative to Whisper) so its duration can be probed via ffprobe;
+    # if the probe fails the recording is transcribed as before (fail-open).
+    # Set all three to 0 to disable the cap entirely. Default 1h0m0s = 3600s.
+    comulytic_max_duration_hours: int = 1
+    comulytic_max_duration_minutes: int = 0
+    comulytic_max_duration_seconds: int = 0
+
 
 # Module-level singleton. Importers read `config.<field>` (NOT a fresh
-# `BotConfig()`), so CLI overrides in `bot/__main__.py` that mutate the
-# singleton propagate to every module. The bot process constructs ONE
-# `BotConfig` (here at import) and shares it everywhere.
+# `BotConfig()`), so CLI overrides in `opencode_discord_bot/__main__.py` that
+# mutate the singleton propagate to every module. The bot process constructs
+# ONE `BotConfig` (here at import) and shares it everywhere.
 config = BotConfig()
 
 

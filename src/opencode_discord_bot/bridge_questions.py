@@ -1,5 +1,5 @@
-"""REST-based equivalent of ``bot.questions.poll_pending_requests`` for the
-Comulytic bridge.
+"""REST-based equivalent of ``opencode_discord_bot.questions.poll_pending_requests``
+for the Comulytic bridge.
 
 The main Discord bot (``commands.py``) surfaces opencode's blocking
 ``question`` / ``permission`` requests as Discord buttons / select menus via

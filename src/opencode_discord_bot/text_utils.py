@@ -5,13 +5,8 @@ avoids importing `commands.py` — that file imports `discord` at module top)
 can reuse the same `_split_message` / `_extract_text` / `_final_assistant_text`
 / `_slugify_prompt` helpers without dragging Pycord into its happy path.
 
-Previously these four helpers were duplicated:
-  - `_split_message` + `_extract_text` + `_slugify_prompt` lived in
-    `commands.py` (which imports Pycord).
-  - `_extract_text` + `_final_assistant_text` were COPIED into `comulytic.py`
-    to keep the bridge Pycord-free.
-This module is the single source of truth now; `commands.py`,
-`comulytic.py`, and `bridge.py` all import from here.
+This module is the single source of truth; `commands.py`, `comulytic.py`,
+and `bridge.py` all import from here.
 """
 
 from __future__ import annotations

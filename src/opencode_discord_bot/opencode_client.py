@@ -7,23 +7,24 @@ are async and operate on a single `httpx.AsyncClient` owned for the process
 lifetime; the client is created lazily so importing this module does not open
 any connection.
 
-The server is spawned and torn down by `OpencodeBot` (setup_hook/close) via
-`bot/opencode_serve.py`; this client just talks to whatever server is at
-`config.opencode_server_url`.
+The server is spawned and torn down by `OpencodeBot` (`on_connect`/`close`)
+via `opencode_discord_bot/opencode_serve.py`; this client just talks to
+whatever server is at `config.opencode_server_url`.
 
-Auth: if `OPENCODE_SERVER_PASSWORD` is set in the environment, basic auth is
-applied to every request (username defaults to `opencode`, overridable via
-`OPENCODE_SERVER_USERNAME`). `OpencodeBot.setup_hook` seeds that env var from
-`config.opencode_server_password` before starting the server, so the client
-and server share the same password by default. See
-https://opencode.ai/docs/server#authentication.
+Auth: if `opencode_server_password` is set (via `config` / `.env` / env
+var), basic auth is applied to every request (username defaults to
+`opencode`, overridable via `opencode_server_username`). `OpencodeBot.on_connect`
+seeds that env var from `config.opencode_server_password` before starting
+the server, so the client and server share the same password by default.
+See https://opencode.ai/docs/server#authentication.
 
 The SSE stream (`stream_events`) is intentionally NOT retried mid-stream by
 this client — a dropped SSE connection should be re-established by the caller,
 which owns the reconnect/backoff loop. Note: the Discord bot no longer uses
 the SSE stream; it polls `GET /session/status` via `get_session_status` (see
-`bot.events.poll_until_idle`) because the v2 SSE wire format proved fragile to
-parse. `stream_events` is retained for other potential consumers.
+`opencode_discord_bot.events.poll_until_idle`) because the v2 SSE wire format
+proved fragile to parse. `stream_events` is retained for other potential
+consumers.
 """
 
 from __future__ import annotations
@@ -44,11 +45,26 @@ _log = logging.getLogger("bot.opencode_client")
 
 
 def _auth() -> tuple[str, str] | None:
-    """Basic-auth tuple if OPENCODE_SERVER_PASSWORD is set, else None."""
-    password = os.environ.get("OPENCODE_SERVER_PASSWORD")
+    """Basic-auth tuple if OPENCODE_SERVER_PASSWORD is set, else None.
+
+    Reads the password from `config.opencode_server_password` (loaded from
+    `.env` / env vars by pydantic-settings). `OpencodeBot.on_connect` also
+    seeds `os.environ["OPENCODE_SERVER_PASSWORD"]` so the spawned
+    `opencode serve` subprocess inherits it; we fall back to that env var
+    so a process that mutated the env post-startup is still honored. The
+    username comes from `config.opencode_server_username` (default
+    "opencode"), with the env var as a back-compat fallback.
+    """
+    password = config.opencode_server_password or os.environ.get(
+        "OPENCODE_SERVER_PASSWORD"
+    )
     if not password:
         return None
-    username = os.environ.get("OPENCODE_SERVER_USERNAME", "opencode")
+    username = (
+        config.opencode_server_username
+        or os.environ.get("OPENCODE_SERVER_USERNAME")
+        or "opencode"
+    )
     return (username, password)
 
 
@@ -295,6 +311,10 @@ class OpencodeClient:
     ) -> dict:
         """POST /session/{id}/message — synchronous wait for full response.
 
+        The bot itself uses ``send_prompt_async`` (fire-and-forget) + status
+        polling everywhere; this synchronous variant is part of the typed
+        REST surface for external consumers who want blocking semantics.
+
         `parts` is the opencode message-parts array, e.g.
         ``[{"type": "text", "text": "..."}]``. `agent` selects an opencode agent
         (e.g. ``"plan"`` for plan mode). Returns ``{ info, parts }``.
@@ -328,7 +348,7 @@ class OpencodeClient:
 
         Pair with `stream_events` to observe progress and the final result
         (the Discord bot uses `get_session_status` polling instead — see
-        `bot.events.poll_until_idle`).
+        `opencode_discord_bot.events.poll_until_idle`).
 
         `model` overrides the agent's frontmatter model for this one call; when
         ``model is None`` (the common case — callers don't pass it), it's
@@ -410,6 +430,8 @@ class OpencodeClient:
         )
 
     # --- agents ---
+    # Not used by the bot itself (the bot never enumerates opencode agents);
+    # part of the typed REST surface for external consumers.
 
     async def list_agents(self) -> list[dict]:
         """GET /agent — all available agents (default + plan + custom)."""

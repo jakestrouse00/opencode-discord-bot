@@ -1,4 +1,5 @@
-"""Entry point for `python -m bot` (also re-used by `bot/bot_start.py`).
+"""Entry point for `python -m opencode_discord_bot` (also re-used by
+`opencode_discord_bot/bot_start.py`).
 
 Reads the bot token from `config.discord_bot_token` (env-overridable via
 `DISCORD_BOT_TOKEN`), constructs `OpencodeBot`, and starts the gateway. Mirrors
@@ -10,9 +11,9 @@ a convenience for ad-hoc runs):
     --server <url>    override opencode_server_url for this run
 
 Run from the repo root in a separate terminal from `python main.py`:
-    python -m bot
-    python -m bot --guild 123456789 --server http://127.0.0.1:4096
-    python bot/bot_start.py
+    python -m opencode_discord_bot
+    python -m opencode_discord_bot --guild 123456789 --server http://127.0.0.1:4096
+    python -m opencode_discord_bot.bot_start
 
 Do NOT run without a token — it exits(1) cleanly with a clear message.
 Do NOT run a second instance with the same token — `singleton.py`'s OS
@@ -34,7 +35,7 @@ _log = logging.getLogger("bot")
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        prog="python -m bot",
+        prog="python -m opencode_discord_bot",
         description="Discord control bot for opencode (two-way gateway).",
     )
     p.add_argument(
@@ -67,7 +68,7 @@ async def main() -> None:
     if not token:
         print(
             "ERROR: discord_bot_token is empty. Set the DISCORD_BOT_TOKEN env var "
-            "or fill in discord_bot_token in bot/config.py / .env.",
+            "or fill in discord_bot_token in .env.",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -110,7 +111,7 @@ async def main() -> None:
         pass
     finally:
         # Always close so OpencodeBot.close() stops the opencode serve
-        # subprocess (setup_hook started it). Without this, Ctrl-C before
+        # subprocess (`on_connect` started it). Without this, Ctrl-C before
         # the gateway is up would orphan the server.
         await bot.close()
         # Release the singleton lock explicitly. Optional — the OS releases

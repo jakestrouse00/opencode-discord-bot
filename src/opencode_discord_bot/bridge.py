@@ -710,6 +710,41 @@ async def _transcribe_and_route(
             "response": "",
         }
 
+    # --- Max-duration cap: mark seen but skip transcription of over-long
+    # recordings. Guards against accidental recordings (e.g. a recorder left
+    # on for hours) being sent through the expensive local Whisper STT pass.
+    # The recording is already in `seen` (poll_once updates seen with ALL
+    # observed noteIds before calling this function), so an early return here
+    # leaves it marked as seen — it won't re-appear as "new" next cycle.
+    # Fail-open: if the probe can't determine duration (ffprobe missing,
+    # corrupt bytes, empty output), transcribe as the existing path does.
+    cap = (
+        config.comulytic_max_duration_hours * 3600
+        + config.comulytic_max_duration_minutes * 60
+        + config.comulytic_max_duration_seconds
+    )
+    if cap > 0:
+        from opencode_discord_bot.voice import probe_audio_duration_seconds
+
+        duration = await probe_audio_duration_seconds(
+            audio_bytes, filename=f"{note_id}.mp3"
+        )
+        if duration is not None and duration > cap:
+            _log.info(
+                "recording %s: duration %.1fs exceeds cap %ds — marking seen, "
+                "skipping transcription",
+                note_id,
+                duration,
+                cap,
+            )
+            return {
+                "note_id": note_id,
+                "transcript": "",
+                "session_id": None,
+                "response": "",
+                "skipped_reason": "duration_exceeds_cap",
+            }
+
     from opencode_discord_bot.voice import extract_audio_to_wav, transcribe_audio
 
     try:

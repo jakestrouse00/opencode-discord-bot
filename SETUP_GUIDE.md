@@ -56,7 +56,7 @@ in a session channel are forwarded to the bound opencode session.
 ### Python 3.13+
 The bot targets Python 3.13+ (matches the orchestrator repo). On 3.13+ the
 stdlib `audioop` module was removed, so `audioop-lts` is installed
-automatically (listed in `requirements.txt`).
+automatically (declared in `pyproject.toml`).
 
 ### pip packages
 ```bash

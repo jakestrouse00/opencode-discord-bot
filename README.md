@@ -281,6 +281,8 @@ All settings are env vars (uppercase of the field name) or entries in a
 | `/oc_voice_stop` | Stop an in-progress /oc_voice recording |
 | `/oc_talk` (with attachment) | Transcribe an audio/video attachment and run it as a prompt |
 | `/oc_cleanup` | Delete all bot-created session channels in the session category (requires Manage Channels) |
+| `/oc_setup` | One-time guild setup: creates the "OpenCode Sessions" category + `voice-recordings` + `bot-commands` channels, writes their IDs to `.env`, reloads config (requires Manage Channels) |
+| `/oc_help` | Post an ephemeral summary of every command |
 
 After `/oc` or `/oc_plan` creates a session channel, any plain-text message in
 that channel is forwarded as a follow-up prompt to the bound opencode session.

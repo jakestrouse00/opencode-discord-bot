@@ -24,7 +24,8 @@ needs shell-style quoting in `.env`, the caller is responsible for including
 the quotes in the string passed to `update_env_file` (pydantic-settings
 strips surrounding single/double quotes on read, so round-tripping works).
 
-Only used by `commands.py::_register_commands`' `/oc_setup` callback. Kept in
+Only used by the `/oc_setup` slash command's callback
+(`OpencodeBot._run_setup` in `opencode_discord_bot/commands.py`). Kept in
 its own module (rather than inlined in `commands.py`) so it's independently
 importable for verification (`python -c "from
 opencode_discord_bot.env_writer import update_env_file; print('ok')"`) and

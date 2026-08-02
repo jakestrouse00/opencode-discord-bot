@@ -7,13 +7,13 @@ truncation. The result is re-normalized through the same regex pipeline as
 `_slugify_prompt` so the LLM output is always a valid Discord channel name.
 
 Import-isolated from the heavy `core.agent` / `core.agents` chain on
-purpose — the bot process is lightweight (it imports `bot.config` and
-`bot.opencode_serve` only). Pulling the agent registry in here would spin
-up MCP toolsets, Langfuse instrumentation, and the full `@register_agent`
-decorator chain on import. The slug generator uses raw `httpx` against the
-OpenAI-compatible Ollama Cloud `/chat/completions` endpoint — the same
-endpoint `core/agent.py:87` builds `OllamaProvider` against, just called
-directly.
+purpose — the bot process is lightweight (it imports
+`opencode_discord_bot.config` and `opencode_discord_bot.opencode_serve`
+only). Pulling the agent registry in here would spin up MCP toolsets,
+Langfuse instrumentation, and the full `@register_agent` decorator chain
+on import. The slug generator uses raw `httpx` against the OpenAI-compatible
+Ollama Cloud `/chat/completions` endpoint — the same endpoint
+`core/agent.py:87` builds `OllamaProvider` against, just called directly.
 
 `generate_slug` NEVER raises. On any error (HTTP error, timeout, unexpected
 JSON shape, empty result, network failure) it returns the supplied
@@ -32,9 +32,9 @@ from opencode_discord_bot.config import config
 _log = logging.getLogger("bot.slug")
 
 # Discord text-channel name length cap (hard API limit; matches
-# `bot/commands.py::_CHANNEL_NAME_MAX`). Duplicated here rather than imported
-# to keep this module dependency-light (importing from `bot.commands` would
-# pull Pycord into the slug path unnecessarily).
+# `text_utils._CHANNEL_NAME_MAX`). Duplicated here rather than imported
+# to keep this module dependency-light (importing from `opencode_discord_bot.commands`
+# would pull Pycord into the slug path unnecessarily).
 _CHANNEL_NAME_MAX = 100
 
 # Module-level lazily-initialized client. Every `/oc*` command triggers a

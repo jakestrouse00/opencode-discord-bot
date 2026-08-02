@@ -44,7 +44,7 @@ if TYPE_CHECKING:
 _log = logging.getLogger("bot.questions")
 
 # Poll interval for the pending-request loop. Matches the session-status poll
-# cadence in bot.events.poll_until_idle so both loops stay in sync.
+# cadence in opencode_discord_bot.events.poll_until_idle so both loops stay in sync.
 _POLL_INTERVAL = 2.0
 
 

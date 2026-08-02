@@ -1,14 +1,14 @@
 """One-off command sync — pushes slash commands to a Discord guild without starting the gateway or the opencode serve subprocess.
 
 Usage (from repo root):
-    python -m bot.sync_commands
-    python -m bot.sync_commands --guild 1532565085422223441
-    python bot/sync_commands.py
+    python -m opencode_discord_bot.sync_commands
+    python -m opencode_discord_bot.sync_commands --guild 1532565085422223441
+    python -m opencode_discord_bot.sync_commands --guild 0  # global (takes ~1hr)
 
 Pycord (`py-cord[voice]`) auto-syncs commands in `on_connect` (which fires
 during `connect()`, not `login()`), so for a one-off sync we call
 `bot.sync_commands()` manually after `login()`. `login()` does NOT call
-`setup_hook` (Pycord has no `setup_hook`), and `on_connect` doesn't fire
+`on_connect` (Pycord has no `setup_hook`), and `on_connect` doesn't fire
 without the gateway loop — so `login()` + `sync_commands()` is the minimal
 path to push commands without starting the gateway. The `opencode serve`
 subprocess is disabled anyway as a safety net.
@@ -33,7 +33,7 @@ _log = logging.getLogger("bot.sync_commands")
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        prog="python -m bot.sync_commands",
+        prog="python -m opencode_discord_bot.sync_commands",
         description="Push opencode bot slash commands to a Discord guild (no gateway, no opencode serve).",
     )
     p.add_argument(
@@ -58,7 +58,7 @@ async def main() -> None:
     if not token:
         print(
             "ERROR: discord_bot_token is empty. Set DISCORD_BOT_TOKEN or fill in "
-            "discord_bot_token in bot/config.py / .env.",
+            "discord_bot_token in .env.",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -67,15 +67,15 @@ async def main() -> None:
     if not guild_id:
         print(
             "ERROR: no guild id. Pass --guild <id> or set discord_bot_guild_id "
-            "in bot/config.py / .env.",
+            "in .env.",
             file=sys.stderr,
         )
         sys.exit(1)
 
     bot = OpencodeBot()
     # Disable the serve subprocess for this one-off sync so on_connect (if it
-    # fires) doesn't spawn it. Pycord's login() does NOT call setup_hook (it
-    # doesn't exist), but this is a good safety net.
+    # fires) doesn't spawn it. Pycord's login() does NOT call on_connect (it
+    # doesn't exist without the gateway), but this is a good safety net.
     bot._serve._enabled = False
     try:
         await bot.login(token)

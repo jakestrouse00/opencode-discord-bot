@@ -31,8 +31,9 @@ well-known path before the bot starts the gateway. The lock is:
     it a recycled PID pointing at a different process?).
 
 The lock file path defaults to `.opencode-discord-bot.lock` in the current
-working directory (matching `BotConfig.model_config`'s cwd-relative
-`.env`). Override via the `OC_SINGLETON_LOCK` env var (absolute path) for
+working directory (matching `BotConfig.model_config`'s cwd-relative `.env`).
+Override via `config.oc_singleton_lock` (the `.env` field, loaded by
+pydantic-settings) or the `OC_SINGLETON_LOCK` env var (absolute path) for
 non-standard launch dirs.
 
 Usage (in `__main__.py`, before `bot.start(token)`):
@@ -66,6 +67,23 @@ _DEFAULT_LOCK_PATH = Path(".opencode-discord-bot.lock")
 _ENV_OVERRIDE = "OC_SINGLETON_LOCK"
 
 
+def _resolve_lock_path() -> Path:
+    """Resolve the lock file path from `config.oc_singleton_lock` then env.
+
+    Priority (matches `opencode_client._auth`'s config-first, env-fallback
+    convention): the `BotConfig.oc_singleton_lock` field (loaded from `.env`
+    via pydantic-settings) wins; the `OC_SINGLETON_LOCK` env var is a
+    back-compat fallback for callers that mutated the env post-startup.
+    Returns `_DEFAULT_LOCK_PATH` when neither is set.
+    """
+    from opencode_discord_bot.config import config
+
+    if config.oc_singleton_lock:
+        return Path(config.oc_singleton_lock)
+    env_path = os.environ.get(_ENV_OVERRIDE)
+    return Path(env_path) if env_path else _DEFAULT_LOCK_PATH
+
+
 class SingletonLockError(RuntimeError):
     """Raised when the bot is already running in another process.
 
@@ -97,12 +115,13 @@ class SingletonLock:
     def acquire_or_raise(cls, path: Path | None = None) -> "SingletonLock":
         """Take the exclusive singleton lock, or raise `SingletonLockError`.
 
-        `path` defaults to `$OC_SINGLETON_LOCK` if set, else
-        `.opencode-discord-bot.lock` in the cwd (matching `BotConfig`'s
-        cwd-relative `.env`). The file is created if it doesn't exist;
-        existing contents are overwritten with the current PID + timestamp
-        for diagnostic purposes (the OS lock is the real gate, not the
-        file contents).
+        `path` defaults to the resolved lock path: `config.oc_singleton_lock`
+        (loaded from `.env` via pydantic-settings) if set, else the
+        `OC_SINGLETON_LOCK` env var if set, else `.opencode-discord-bot.lock`
+        in the cwd (matching `BotConfig`'s cwd-relative `.env`). The file is
+        created if it doesn't exist; existing contents are overwritten with
+        the current PID + timestamp for diagnostic purposes (the OS lock is
+        the real gate, not the file contents).
 
         Raises `SingletonLockError` if another process holds the lock.
         Raises `OSError` (subclass) for genuine filesystem failures
@@ -110,8 +129,7 @@ class SingletonLock:
         and propagate so the caller doesn't silently run unguarded.
         """
         if path is None:
-            env_path = os.environ.get(_ENV_OVERRIDE)
-            path = Path(env_path) if env_path else _DEFAULT_LOCK_PATH
+            path = _resolve_lock_path()
         path = Path(path)
         # Open for read+write, create if missing. Binary mode — we write
         # ASCII diagnostics, but on Windows `msvcrt.locking` requires a

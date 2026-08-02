@@ -61,17 +61,26 @@ control bot.
   importable after `pip install -e .` (or adding `src/` to `PYTHONPATH` for
   development). Top-level files (`index.json`, `discord-bot/SKILL.md`,
   `AGENTS.md`, `README.md`, `pyproject.toml`, `.env.example`) sit at the repo
-  root, NOT inside the package.
+  root, NOT inside the package. Notable modules beyond the ones called out
+  below: `singleton.py` (the `SingletonLock` single-instance guard — see
+  its own bullet), `env_writer.py` (the idempotent atomic `.env` updater
+  used by `/oc_setup`), `bot_start.py` (a thin script wrapper over
+  `__main__.main` for launching without the `-m` flag — not in
+  `[project.scripts]`, kept for convenience).
 - **`OpencodeBot(discord.Bot)`** — the main bot class
   (`opencode_discord_bot/commands.py`). Owns the slash-command surface
   (`/oc`, `/oc_plan`, `/oc_new`, `/oc_session`, `/oc_abort`, `/oc_sessions`,
-  `/oc_voice`, `/oc_voice_stop`, `/oc_talk`, `/oc_cleanup`) + the plain-text follow-up path
-  (`on_message`). Each `/oc` or `/oc_plan` invocation creates a fresh opencode
-  session AND a fresh Discord text channel under the configured category
-  (`discord_bot_session_category_id`), then posts the response there.
-  Subsequent plain-text messages in that session channel are forwarded to the
-  bound opencode session as follow-up prompts. The bot ignores messages in
-  channels it did not create.
+  `/oc_voice`, `/oc_voice_stop`, `/oc_talk`, `/oc_cleanup`, `/oc_setup`,
+  `/oc_help`) + the plain-text follow-up path (`on_message`) + the
+  edit-to-revert path (`on_message_edit`). Each `/oc` or `/oc_plan` invocation
+  creates a fresh opencode session AND a fresh Discord text channel under the
+  configured category (`discord_bot_session_category_id`), then posts the
+  response there. Subsequent plain-text messages in that session channel are
+  forwarded to the bound opencode session as follow-up prompts; editing one's
+  own follow-up message aborts the running session, reverts to the mapped
+  opencode user message, and resends the edited text as a fresh prompt
+  (mirrors the opencode GUI's stop-revert-edit-resend flow). The bot ignores
+  messages in channels it did not create.
   `/oc_cleanup` is the one destructive maintenance command: it deletes every
   text channel under `discord_bot_session_category_id` and clears the matching
   `SessionRouter` bindings (via `router.reset`), leaving the category itself
@@ -80,6 +89,15 @@ control bot.
   for cleaning up the server between test sessions. Discovery is strictly
   category-scoped (`category.text_channels`), so allowlisted command channels,
   voice channels, and user-created channels are never enumerated or deleted.
+  `/oc_setup` is the one-time guild setup command (requires Manage Channels):
+  it creates the "OpenCode Sessions" category plus two guild-root text channels
+  (`voice-recordings` → `VOICE_MESSAGE_TRIGGER_CHANNEL_ID`, `bot-commands` →
+  `DISCORD_BOT_ALLOWED_CHANNEL_IDS`), writes their IDs + the guild id to `.env`
+  atomically via `env_writer.update_env_file`, reloads the `config` singleton
+  in place via `reload_config()`, and refuses to run twice (gates on whether
+  any of the three guild-specific output fields is already non-default). See
+  SETUP_GUIDE.md "`/oc_setup` — one-time guild setup" for the full flow.
+  `/oc_help` posts an ephemeral summary of every command.
 - **`OpencodeClient`** (`opencode_client.py`) — async `httpx` wrapper over
   the opencode server REST API (sessions, messages, questions, permissions,
   events). No official Python SDK exists (the SDK is JS/TS-only), so this is
@@ -117,7 +135,21 @@ control bot.
   when the bot's `.env` lives in a subdirectory but the user's `.opencode/`
   (plans, agents, config) lives at the project root; without it, sessions
   resolve to the subdir and can't find plans/agents (the silent plan-loss
-  bug).
+  bug). Windows reliability backstop: `_assign_kill_on_close_job` assigns
+  the subprocess tree to a Windows Job Object with
+  `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` so the `opencode serve` tree is reaped
+  if the Python parent is force-killed (TerminateProcess, segfault) before
+  `try/finally`/`atexit` can run.
+- **`SingletonLock`** (`singleton.py`) — OS-level file lock
+  (`.opencode-discord-bot.lock`, gitignored) that prevents two bot processes
+  from racing for the single Discord gateway session per bot token.
+  `__main__.main` calls `SingletonLock.acquire_or_raise()` before importing
+  `OpencodeBot` / starting the gateway; a second instance exits(1) with a
+  clear message instead of causing "The application did not respond" errors
+  from a dual-launch gateway race. The lock is auto-released by the OS on
+  process exit (even on crash), so a crashed previous instance never leaves
+  a stale lock. Override the lock path via `OC_SINGLETON_LOCK` (absolute
+  path; empty = `.opencode-discord-bot.lock` in the launch cwd).
 - **`SessionRouter`** (`session_router.py`) — maps Discord channel id ->
   opencode session id, persisted to `.opencode-discord-bot-sessions.json`
   (gitignored). One persistent opencode session per Discord channel. Loaded
@@ -266,9 +298,10 @@ control bot.
 - Env-var overrides: `DISCORD_BOT_TOKEN` / `DISCORD_BOT_GUILD_ID` /
   `DISCORD_BOT_ALLOWED_CHANNEL_IDS` (JSON list) /
   `DISCORD_BOT_SESSION_CATEGORY_ID` / `OPENCODE_SERVER_URL` /
-  `OPENCODE_SERVER_PASSWORD` / `OPENCODE_SERVE_ENABLED` /
-  `OPENCODE_SERVE_PORT` / `OPENCODE_SERVE_HOSTNAME` / `OPENCODE_SERVE_CORS`
+  `OPENCODE_SERVER_PASSWORD` / `OPENCODE_SERVER_USERNAME` /
+  `OPENCODE_SERVE_ENABLED` / `OPENCODE_SERVE_PORT` / `OPENCODE_SERVE_HOSTNAME` / `OPENCODE_SERVE_CORS`
   (JSON list)   / `OPENCODE_SERVE_STARTUP_TIMEOUT` / `OPENCODE_SERVE_CWD` /
+  `OC_SINGLETON_LOCK` /
   `OPENCODE_DEFAULT_MODEL` / `OPENCODE_PLAN_AUTHOR_MODEL` /
   `VOICE_MESSAGE_ENABLED` / `VOICE_MESSAGE_TRIGGER_CHANNEL_ID` /
   `VOICE_SILENCE_TIMEOUT_SECONDS` / `VOICE_CHUNK_SECONDS` /
@@ -282,7 +315,8 @@ control bot.
   `COMULYTIC_POLL_PAGE_SIZE` / `COMULYTIC_USER_AGENT` / `COMULYTIC_PLAN_TYPE` /
   `COMULYTIC_RELOGIN_WARN_DAYS` / `COMULYTIC_STATE_FILE` /
   `COMULYTIC_DISCORD_POINTER_CHANNEL_ID` / `COMULYTIC_QUESTION_TIMEOUT_SECONDS` /
-  `COMULYTIC_QUESTION_POLL_INTERVAL_SECONDS`.
+  `COMULYTIC_QUESTION_POLL_INTERVAL_SECONDS` / `COMULYTIC_MAX_DURATION_HOURS` /
+  `COMULYTIC_MAX_DURATION_MINUTES` / `COMULYTIC_MAX_DURATION_SECONDS`.
 - Get the keys at: Discord bot token at
   https://discord.com/developers/applications (Bot tab), OpenAI key at
   https://platform.openai.com/api-keys, Ollama Cloud key at

@@ -33,6 +33,15 @@ them via faster-whisper (local, CTranslate2) or OpenAI Whisper (cloud).
 - **`/oc_voice_stop`** — stops an in-progress `/oc_voice` recording.
 - **`/oc_talk`** (with an audio/video attachment) — transcribes the attached
   audio and runs it as an opencode prompt.
+- **`/oc_cleanup`** — deletes every text channel under the configured
+  session category and clears the matching `SessionRouter` bindings, leaving
+  the category itself intact. Requires the Manage Channels permission.
+- **`/oc_setup`** — one-time guild setup: creates the "OpenCode Sessions"
+  category plus the `voice-recordings` and `bot-commands` channels, writes
+  their IDs + the guild id to `.env`, and reloads config live. Requires the
+  Manage Channels permission. Refuses to run twice (clear the guild-specific
+  fields in `.env` to re-run).
+- **`/oc_help`** — posts an ephemeral summary of every command.
 
 ## How to install it
 
@@ -210,6 +219,9 @@ unaffected — only `/oc_voice` recording needs the replacement.
 | `/oc_voice <mode>` | Record a spoken prompt in your voice channel (mode: change/note) |
 | `/oc_voice_stop` | Stop an in-progress /oc_voice recording |
 | `/oc_talk` (with attachment) | Transcribe an audio/video attachment and run it as a prompt |
+| `/oc_cleanup` | Delete all bot-created session channels in the session category (requires Manage Channels) |
+| `/oc_setup` | One-time guild setup: creates the "OpenCode Sessions" category + `voice-recordings` + `bot-commands` channels, writes their IDs to `.env`, reloads config (requires Manage Channels) |
+| `/oc_help` | Post an ephemeral summary of every command |
 
 ## faster-whisper model options
 

@@ -22,10 +22,11 @@ Design:
   kills the launcher). POSIX: `SIGTERM` the group, escalate to `SIGKILL`
   after a grace period.
 
-This module imports only stdlib + `bot.config` so importing it has no heavy
-deps (no PySide6, no pydantic-ai) — mirrors the bot's lightweight-import
-convention. It is a standalone copy of `core/opencode_serve.py`, decoupled
-from `core.settings` so the `bot/` package is self-contained.
+This module imports only stdlib + `opencode_discord_bot.config` so importing
+it has no heavy deps (no PySide6, no pydantic-ai) — mirrors the bot's
+lightweight-import convention. It is a standalone copy of
+`core/opencode_serve.py`, decoupled from `core.settings` so the
+`opencode_discord_bot/` package is self-contained.
 """
 
 from __future__ import annotations

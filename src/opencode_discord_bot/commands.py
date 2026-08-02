@@ -1,13 +1,14 @@
 """OpencodeBot — the Discord command surface for the opencode control bot.
 
-`OpencodeBot(discord.Client)` owns an `app_commands.CommandTree` of slash
-commands (no prefix commands) PLUS a plain-text follow-up path via
-`on_message`. Each `/oc` or `/oc_plan` invocation creates a fresh opencode
-session AND a fresh Discord text channel under the configured category
-(`discord_bot_session_category_id`), then posts the response there. Any
-subsequent plain-text message in that session channel is forwarded to the
-bound opencode session as a follow-up prompt. The bot ignores messages in
-channels it did not create.
+`OpencodeBot(discord.Bot)` owns a decorator-based slash-command surface
+(`@self.slash_command` + `discord.Option`, no prefix commands) PLUS a
+plain-text follow-up path via `on_message` (and an edit-to-revert path via
+`on_message_edit`). Each `/oc` or `/oc_plan` invocation creates a fresh
+opencode session AND a fresh Discord text channel under the configured
+category (`discord_bot_session_category_id`), then posts the response there.
+Any subsequent plain-text message in that session channel is forwarded to
+the bound opencode session as a follow-up prompt. The bot ignores messages
+in channels it did not create.
 
 Slash commands defer the interaction (opencode prompts can take minutes),
 stream progress back to the new channel via `poll_until_idle` (polling
@@ -25,7 +26,7 @@ session channels; bot-created session channels are always honored (they're
 identified via `SessionRouter.current`). Other channels get an ephemeral
 "not allowed" reply. Empty list = all channels allowed (for testing/personal use).
 
-Run via `python -m bot` (see bot/__main__.py).
+Run via `python -m opencode_discord_bot` (see `opencode_discord_bot/__main__.py`).
 """
 
 from __future__ import annotations
@@ -64,7 +65,7 @@ from opencode_discord_bot.env_writer import update_env_file
 
 _log = logging.getLogger("bot.commands")
 
-# Throttle for editing the "working…" progress message. discord.py's
+# Throttle for editing the "working…" progress message. Pycord's
 # Message.edit is rate-limited (~5 edits/5s per channel); editing on every SSE
 # event (dozens/sec during tool execution) would trip 429s. ~2s is safe.
 PROGRESS_EDIT_MIN_INTERVAL = 2.0
@@ -106,7 +107,8 @@ class OpencodeBot(discord.Bot):
     server (so the bot's `OpencodeClient` has something to talk to by the time
     it handles the first slash command), and `close` stops it. The password the
     server is spawned with is also seeded into this process's `os.environ` so
-    `OpencodeClient._auth()` sends matching basic-auth on every request.
+    the spawned subprocess inherits it; `OpencodeClient._auth()` reads
+    `config.opencode_server_password` first and falls back to that env var.
 
     Built on Pycord (`py-cord[voice]`) rather than mainline discord.py because
     Pycord provides the voice recording/sinks API (`VoiceClient.start_recording`
@@ -203,9 +205,7 @@ class OpencodeBot(discord.Bot):
         # pushed. When `discord_bot_guild_id` is 0 (unset), fall back to None
         # (global) — matching a global sync.
         _guild_ids = (
-            [config.discord_bot_guild_id]
-            if config.discord_bot_guild_id
-            else None
+            [config.discord_bot_guild_id] if config.discord_bot_guild_id else None
         )
 
         @self.slash_command(
@@ -219,7 +219,10 @@ class OpencodeBot(discord.Bot):
         ) -> None:
             _log.info(
                 "/oc received (user=%s, channel=%s, guild=%s): %s",
-                ctx.author, ctx.channel_id, ctx.guild_id, _log_preview(prompt)
+                ctx.author,
+                ctx.channel_id,
+                ctx.guild_id,
+                _log_preview(prompt),
             )
             await self._run_prompt(ctx, prompt, agent=None)
 
@@ -308,13 +311,16 @@ class OpencodeBot(discord.Bot):
                 if isinstance(session.get("status"), dict)
                 else str(session.get("status", "unknown"))
             )
-            _log.info("/oc_session -> session=%s title=%r status=%s", sid, title, status)
+            _log.info(
+                "/oc_session -> session=%s title=%r status=%s", sid, title, status
+            )
             await ctx.followup.send(
                 f"Session `{sid}`\nTitle: {title}\nStatus: {status}"
             )
 
         @self.slash_command(
-            name="oc_sessions", description="List recent opencode sessions.",
+            name="oc_sessions",
+            description="List recent opencode sessions.",
             guild_ids=_guild_ids,
         )
         async def oc_sessions(ctx: discord.ApplicationContext) -> None:
@@ -577,7 +583,8 @@ class OpencodeBot(discord.Bot):
             await self._run_setup(ctx)
 
         @self.slash_command(
-            name="oc_help", description="List the opencode bot commands.",
+            name="oc_help",
+            description="List the opencode bot commands.",
             guild_ids=_guild_ids,
         )
         async def oc_help(ctx: discord.ApplicationContext) -> None:
@@ -630,26 +637,12 @@ class OpencodeBot(discord.Bot):
             await ctx.respond(text)
 
     async def on_interaction(self, interaction: discord.Interaction) -> None:
-        # TEMP diagnostic: log every interaction arrival so we can see whether
-        # slash-command dispatches reach the bot at all (regardless of whether
-        # process_application_commands finds a match). Without this, a command-
-        # ID mismatch silently drops the interaction with no log, producing
-        # "The application did not respond" with no clue. Remove once the
-        # dispatch issue is resolved.
-        try:
-            data = interaction.data or {}
-            name = data.get("name") or data.get("custom_id") or "?"
-            cmd_id = data.get("id", "?")
-            _log.info(
-                "on_interaction: type=%s id=%s name=%s guild=%s channel=%s",
-                interaction.type,
-                cmd_id,
-                name,
-                interaction.guild_id,
-                interaction.channel_id,
-            )
-        except Exception:  # noqa: BLE001 — diagnostic must not break dispatch
-            _log.warning("on_interaction diagnostic log raised", exc_info=True)
+        # Delegate to Pycord's dispatcher, which routes application-command
+        # interactions to the matching `@self.slash_command` callback and
+        # component interactions (buttons/select menus from `questions.py`)
+        # to their View's `callback`. The dispatcher is a no-op for unknown
+        # interaction ids, which is fine — silently dropping a stray
+        # component id is better than failing the whole interaction.
         await self.process_application_commands(interaction)
 
     async def on_connect(self) -> None:
@@ -673,9 +666,11 @@ class OpencodeBot(discord.Bot):
         guards against spawning a second subprocess.
 
         The password `OpencodeServe` spawns the server with is seeded into
-        this process's `os.environ` so `OpencodeClient._auth()` sends matching
-        basic-auth on every request (the client reads the env var at request
-        time, not import time, so setting it here is sufficient).
+        this process's `os.environ` so the spawned subprocess inherits it.
+        `OpencodeClient._auth()` reads `config.opencode_server_password`
+        first (loaded from `.env` at import) and falls back to this env
+        var, so the client and server share the same password regardless
+        of which path populated it.
         """
         # No `await super().on_connect()` here — `auto_sync_commands=False`
         # (set in __init__) makes it a no-op, and skipping it documents that
@@ -1152,7 +1147,7 @@ class OpencodeBot(discord.Bot):
         # for this session as Discord buttons/selects (or via voice when
         # `voice_session` is set). Runs concurrently with `poll_until_idle` and
         # is cancelled when the session goes idle (or times out). See
-        # bot.questions.poll_pending_requests.
+        # opencode_discord_bot.questions.poll_pending_requests.
         stop_event = asyncio.Event()
         poller = asyncio.create_task(
             poll_pending_requests(
@@ -1528,7 +1523,9 @@ class OpencodeBot(discord.Bot):
         try:
             await self.client.send_prompt_async(sid, parts)
         except OpencodeError as e:
-            _log.warning("follow-up send_prompt_async failed for session %s: %r", sid, e)
+            _log.warning(
+                "follow-up send_prompt_async failed for session %s: %r", sid, e
+            )
             await message.channel.send(
                 f"Failed to send follow-up to session `{sid}`: {e}"
             )

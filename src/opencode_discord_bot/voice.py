@@ -96,7 +96,7 @@ def _openai_client():
     if not config.openai_api_key:
         raise RuntimeError(
             "openai_api_key is empty. Set OPENAI_API_KEY (or fill in "
-            "openai_api_key in bot/config.py / .env) to use the cloud STT/TTS path."
+            "openai_api_key in .env) to use the cloud STT/TTS path."
         )
     return AsyncOpenAI(api_key=config.openai_api_key)
 
@@ -388,6 +388,61 @@ async def extract_audio_to_wav(
             f"ffmpeg conversion to WAV failed (code {proc.returncode}): {err}"
         )
     return stdout
+
+
+async def probe_audio_duration_seconds(
+    audio_bytes: bytes, *, filename: str = "audio.mp3"
+) -> float | None:
+    """Probe the duration of audio bytes via ``ffprobe`` (best-effort).
+
+    Writes ``audio_bytes`` to a temp file (ffprobe reads from a path, not
+    stdin), runs ``ffprobe -v error -show_entries format=duration
+    -of default=noprint_wrappers=1:nokey=1 <tmp>``, parses stdout as a float
+    (seconds), and returns it. Returns ``None`` on ANY failure — ffprobe
+    missing, non-zero exit, empty bytes, or unparseable output — so callers
+    can fail-open (transcribe as the existing path does) rather than
+    silently skipping valid short recordings when the probe hiccups.
+
+    ``filename`` only affects the temp file's suffix (used by ffprobe for
+    format inference on ambiguous inputs); defaults to ``audio.mp3``.
+    """
+    if not audio_bytes:
+        return None
+    suffix = "." + filename.rsplit(".", 1)[-1] if "." in filename else ".mp3"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        tmp.write(audio_bytes)
+        tmp_path = tmp.name
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            tmp_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _stderr = await proc.communicate()
+        if proc.returncode != 0 or not stdout:
+            return None
+        text = stdout.decode("utf-8", "replace").strip()
+        if not text or text.upper() == "N/A":
+            return None
+        try:
+            return float(text)
+        except ValueError:
+            return None
+    except FileNotFoundError:
+        # ffprobe not on PATH — fail-open (caller transcribes as before).
+        return None
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
 
 
 class VoiceSession:

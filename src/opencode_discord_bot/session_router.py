@@ -5,8 +5,8 @@ construction and saved after each new binding so a bot restart does not lose
 the channel->session binding (opencode sessions survive on the server side,
 so reattaching is just restoring the id mapping).
 
-The persisted file (`bot/.sessions.json` by default) is gitignored — see
-`bot/.gitignore`. It contains only session ids, no secrets.
+The persisted file (`.opencode-discord-bot-sessions.json` by default) is
+gitignored — see `.gitignore`. It contains only session ids, no secrets.
 
 The file write happens on the bot's event loop, so `bind`/`reset`/`save`
 are async and offload the disk write to a thread via `asyncio.to_thread` —
@@ -82,6 +82,11 @@ class SessionRouter:
         title: str | None = None,
     ) -> str:
         """Return the bound session id, creating + persisting a new one if none.
+
+        The bot itself uses ``bind`` directly (it creates the opencode session
+        and the Discord channel in one flow, then records the binding); this
+        convenience method is part of the public API surface for external
+        consumers who want a one-call create-and-bind.
 
         The opencode session title defaults to ``f"discord-{channel_id}"`` so
         it's identifiable in the opencode session list. Always creates a fresh
