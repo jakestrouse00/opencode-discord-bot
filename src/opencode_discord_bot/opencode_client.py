@@ -228,6 +228,24 @@ class OpencodeClient:
             params["limit"] = limit
         return await self._request("GET", f"/session/{sid}/message", params=params)
 
+    def _resolve_model(self, agent: str | None) -> str | None:
+        """Pick the model to send for a prompt, based on the agent + config.
+
+        Returns the configured override model id (non-empty) for the agent, or
+        None to let the opencode server fall back to the agent's frontmatter
+        ``model:`` field (the historical behavior when both overrides are
+        empty). Two separate config fields cover the two agent surfaces the
+        bot uses: ``opencode_default_model`` for ``agent=None`` (``/oc`` +
+        plain-text follow-ups) and ``opencode_plan_author_model`` for
+        ``agent="plan-author"`` (``/oc_plan`` / ``/oc_voice`` / ``/oc_talk`` /
+        voice-message trigger / Comulytic bridge). Other agent names (custom
+        agents, if any) fall under the default field too — there's no
+        per-agent override beyond these two.
+        """
+        if agent == "plan-author":
+            return config.opencode_plan_author_model or None
+        return config.opencode_default_model or None
+
     async def send_message(
         self,
         sid: str,
@@ -240,12 +258,19 @@ class OpencodeClient:
         `parts` is the opencode message-parts array, e.g.
         ``[{"type": "text", "text": "..."}]``. `agent` selects an opencode agent
         (e.g. ``"plan"`` for plan mode). Returns ``{ info, parts }``.
+
+        `model` overrides the agent's frontmatter model for this one call; when
+        ``model is None`` (the common case — callers don't pass it), it's
+        resolved from config via ``_resolve_model`` so the bot's
+        ``OPENCODE_DEFAULT_MODEL`` / ``OPENCODE_PLAN_AUTHOR_MODEL`` env vars
+        flow through transparently.
         """
         body: dict = {"parts": parts}
         if agent is not None:
             body["agent"] = agent
-        if model is not None:
-            body["model"] = model
+        resolved_model = model if model is not None else self._resolve_model(agent)
+        if resolved_model:
+            body["model"] = resolved_model
         return await self._request("POST", f"/session/{sid}/message", json=body)
 
     async def send_prompt_async(
@@ -260,12 +285,19 @@ class OpencodeClient:
         Pair with `stream_events` to observe progress and the final result
         (the Discord bot uses `get_session_status` polling instead — see
         `bot.events.poll_until_idle`).
+
+        `model` overrides the agent's frontmatter model for this one call; when
+        ``model is None`` (the common case — callers don't pass it), it's
+        resolved from config via ``_resolve_model`` so the bot's
+        ``OPENCODE_DEFAULT_MODEL`` / ``OPENCODE_PLAN_AUTHOR_MODEL`` env vars
+        flow through transparently.
         """
         body: dict = {"parts": parts}
         if agent is not None:
             body["agent"] = agent
-        if model is not None:
-            body["model"] = model
+        resolved_model = model if model is not None else self._resolve_model(agent)
+        if resolved_model:
+            body["model"] = resolved_model
         await self._request("POST", f"/session/{sid}/prompt_async", json=body)
 
     # --- questions ---
