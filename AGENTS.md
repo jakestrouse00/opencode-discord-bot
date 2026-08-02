@@ -15,9 +15,19 @@ control bot.
   `OpencodeBot.on_connect`).
 - **Configure:** set `DISCORD_BOT_TOKEN` (required) +
   `OPENCODE_SERVER_PASSWORD` (required) + optional `OPENAI_API_KEY` (TTS +
-  cloud STT fallback) + optional `OLLAMA_AUTH_KEY` (LLM channel-name slugs)
-  via env vars or a `.env` file in the run directory. See `.env.example` for
-  the full list.
+  cloud STT fallback) + optional `OLLAMA_AUTH_KEY` (LLM channel-name slugs) +
+  optional `OPENCODE_DEFAULT_MODEL` / `OPENCODE_PLAN_AUTHOR_MODEL` (override
+  the opencode model for `/oc`/follow-ups vs `/oc_plan`/`/oc_voice`/`/oc_talk`/
+  bridge) via env vars or a `.env` file in the run directory. See `.env.example`
+  for the full list.
+- **Install the `plan-author` agent:** the bot's `/oc_plan`, `/oc_voice`,
+  `/oc_talk`, voice-message trigger, and Comulytic-bridge paths route to
+  opencode's `plan-author` agent, which is **not** built into opencode — it
+  lives in the target project's `.opencode/agent/plan-author.md`. This package
+  ships a generic, self-contained copy. Run
+  `python -m opencode_discord_bot.install_agent` (from the target project's
+  root, or `--dest <project root>`) to install it. See `SETUP_GUIDE.md`
+  "Install the plan-author agent" for details.
 - **Run:** `python -m opencode_discord_bot` (or `opencode-discord-bot`). The
   bot starts the Discord gateway, auto-spawns `opencode serve` as a child
   process (unless `OPENCODE_SERVE_ENABLED=false`). **Slash commands are NOT
@@ -49,18 +59,43 @@ control bot.
 - **`OpencodeBot(discord.Bot)`** — the main bot class
   (`opencode_discord_bot/commands.py`). Owns the slash-command surface
   (`/oc`, `/oc_plan`, `/oc_new`, `/oc_session`, `/oc_abort`, `/oc_sessions`,
-  `/oc_voice`, `/oc_voice_stop`, `/oc_talk`) + the plain-text follow-up path
+  `/oc_voice`, `/oc_voice_stop`, `/oc_talk`, `/oc_cleanup`) + the plain-text follow-up path
   (`on_message`). Each `/oc` or `/oc_plan` invocation creates a fresh opencode
   session AND a fresh Discord text channel under the configured category
   (`discord_bot_session_category_id`), then posts the response there.
   Subsequent plain-text messages in that session channel are forwarded to the
   bound opencode session as follow-up prompts. The bot ignores messages in
   channels it did not create.
+  `/oc_cleanup` is the one destructive maintenance command: it deletes every
+  text channel under `discord_bot_session_category_id` and clears the matching
+  `SessionRouter` bindings (via `router.reset`), leaving the category itself
+  intact for reuse. It requires the Manage Channels permission (gated in the
+  callback via `ctx.author.guild_permissions.manage_channels`) and is intended
+  for cleaning up the server between test sessions. Discovery is strictly
+  category-scoped (`category.text_channels`), so allowlisted command channels,
+  voice channels, and user-created channels are never enumerated or deleted.
 - **`OpencodeClient`** (`opencode_client.py`) — async `httpx` wrapper over
   the opencode server REST API (sessions, messages, questions, permissions,
   events). No official Python SDK exists (the SDK is JS/TS-only), so this is
   a thin typed surface over the documented REST endpoints. Auth: basic auth
-  via `OPENCODE_SERVER_PASSWORD` env var.
+  via `OPENCODE_SERVER_PASSWORD` env var. **Model overrides:**
+  `send_prompt_async` / `send_message` resolve the model id from
+  `config.opencode_default_model` (for `agent=None` — `/oc` + plain-text
+  follow-ups) or `config.opencode_plan_author_model` (for `agent="plan-author"`
+  — `/oc_plan`, `/oc_voice`, `/oc_talk`, voice-message trigger, Comulytic
+  bridge) via `_resolve_model`, and include it in the POST body only when
+  non-empty. Both empty (the default) = each opencode agent's own frontmatter
+  `model:` field wins (the historical behavior). No call site passes `model`
+  explicitly — the override flows through transparently.
+- **Bundled `plan-author` agent** (`opencode_discord_bot/agent/plan-author.md`)
+  — a fully generic, self-contained Plan Author subagent shipped inside the
+  package. The bot routes plan-author prompts to opencode's `plan-author`
+  agent, which the target project must have installed at
+  `.opencode/agent/plan-author.md`. The bundled copy is project-agnostic (it
+  reads the target project's own `AGENTS.md` if present, writes only to
+  `.opencode/plans/`, and is compatible with the `change-outline` skill if
+  that's installed). Install it via `python -m opencode_discord_bot.install_agent`
+  (see `install_agent.py`). Shipped in the wheel via hatchling `force-include`.
 - **`OpencodeServe`** (`opencode_serve.py`) — lifecycle manager for the
   `opencode serve` subprocess. `OpencodeBot.on_connect` spawns it on login
   (guarded by `_serve_started` so reconnects don't re-spawn);
@@ -228,6 +263,7 @@ control bot.
   `OPENCODE_SERVER_PASSWORD` / `OPENCODE_SERVE_ENABLED` /
   `OPENCODE_SERVE_PORT` / `OPENCODE_SERVE_HOSTNAME` / `OPENCODE_SERVE_CORS`
   (JSON list)   / `OPENCODE_SERVE_STARTUP_TIMEOUT` / `OPENCODE_SERVE_CWD` /
+  `OPENCODE_DEFAULT_MODEL` / `OPENCODE_PLAN_AUTHOR_MODEL` /
   `VOICE_MESSAGE_ENABLED` / `VOICE_MESSAGE_TRIGGER_CHANNEL_ID` /
   `VOICE_SILENCE_TIMEOUT_SECONDS` / `VOICE_CHUNK_SECONDS` /
   `VOICE_STT_PROVIDER` / `VOICE_STT_MODEL` / `VOICE_LOCAL_WHISPER_MODEL` /

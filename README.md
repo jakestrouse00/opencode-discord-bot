@@ -136,6 +136,7 @@ All settings are env vars (uppercase of the field name) or entries in a
 | `/oc_voice <mode>` | Record a spoken prompt in your voice channel (mode: change/note) |
 | `/oc_voice_stop` | Stop an in-progress /oc_voice recording |
 | `/oc_talk` (with attachment) | Transcribe an audio/video attachment and run it as a prompt |
+| `/oc_cleanup` | Delete all bot-created session channels in the session category (requires Manage Channels) |
 
 After `/oc` or `/oc_plan` creates a session channel, any plain-text message in
 that channel is forwarded as a follow-up prompt to the bound opencode session.

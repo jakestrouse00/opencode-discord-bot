@@ -32,7 +32,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 import discord
@@ -57,7 +59,8 @@ from opencode_discord_bot.voice import (
     transcribe_audio,
 )
 from opencode_discord_bot.opencode_serve import OpencodeServe, _REPO_ROOT
-from opencode_discord_bot.config import config
+from opencode_discord_bot.config import config, reload_config
+from opencode_discord_bot.env_writer import update_env_file
 
 _log = logging.getLogger("bot.commands")
 
@@ -65,6 +68,14 @@ _log = logging.getLogger("bot.commands")
 # Message.edit is rate-limited (~5 edits/5s per channel); editing on every SSE
 # event (dozens/sec during tool execution) would trip 429s. ~2s is safe.
 PROGRESS_EDIT_MIN_INTERVAL = 2.0
+
+# Stale baked-in default for `voice_message_trigger_channel_id` (see
+# `config.py:107`). The field's documented "0 = disabled" sentinel is the
+# clean unset state, but `config.py` ships with this non-zero magic number
+# pointing at a specific channel in the original dev server. For `/oc_setup`'s
+# "is this bot already set up?" gate, BOTH the 0 sentinel and this stale
+# baked-in default count as "unset" — a fresh guild has neither.
+_STALE_DEFAULT_TRIGGER_CHANNEL_ID = 1533242090862149842
 
 
 def _channel_allowed(channel_id: int) -> bool:
@@ -348,6 +359,102 @@ class OpencodeBot(discord.Bot):
             await self._run_talk_session(ctx, recording, plan_type)
 
         @self.slash_command(
+            name="oc_cleanup",
+            description="Delete all bot-created session channels in the session category.",
+        )
+        async def oc_cleanup(ctx: discord.ApplicationContext) -> None:
+            # Defer (ephemeral) because deleting many channels can take a few
+            # seconds and we need to keep the interaction alive. Ephemeral so
+            # the summary is only visible to the caller, not the whole guild.
+            await ctx.defer(ephemeral=True)
+            # Permission gate: bulk channel deletion is destructive, so it's
+            # restricted to members with the Manage Channels permission (guild
+            # admins and anyone granted the permission). A typo or stray
+            # invocation by a non-admin must not be able to wipe channels.
+            if not ctx.author.guild_permissions.manage_channels:
+                await ctx.followup.send(
+                    "You need the Manage Channels permission to use this command.",
+                    ephemeral=True,
+                )
+                return
+            # Resolve the session category. 0/unset = the bot was never
+            # configured to create session channels under a category, so there
+            # is nothing the bot created that this command should touch.
+            category_id = config.discord_bot_session_category_id
+            if category_id == 0:
+                await ctx.followup.send(
+                    "No session category is configured "
+                    "(`DISCORD_BOT_SESSION_CATEGORY_ID` is 0). Nothing to clean up."
+                )
+                return
+            category = ctx.guild.get_channel(category_id)
+            if category is None:
+                await ctx.followup.send(
+                    f"Session category {category_id} not found in this guild. "
+                    "Set `DISCORD_BOT_SESSION_CATEGORY_ID` to an existing category."
+                )
+                return
+            if not isinstance(category, discord.CategoryChannel):
+                # The configured id points at a non-category channel (e.g. a
+                # text or voice channel); iterating `.text_channels` on it would
+                # raise AttributeError, so fail with a clear error instead.
+                await ctx.followup.send(
+                    f"Channel {category_id} is not a category "
+                    f"(got {type(category).__name__}). "
+                    "Set `DISCORD_BOT_SESSION_CATEGORY_ID` to a category channel."
+                )
+                return
+            # Snapshot the targets before deleting so the loop iterates over a
+            # stable list (deletion mutates `category.text_channels` in place).
+            # Category-scoped iteration is the safety mechanism: only channels
+            # the bot created under this category are ever enumerated, so
+            # allowlisted command channels, voice channels, and user-created
+            # channels are never at risk.
+            targets = list(category.text_channels)
+            if not targets:
+                await ctx.followup.send("No session channels to clean up.")
+                return
+            deleted = 0
+            failed: list[str] = []
+            # Clear the SessionRouter binding for each deleted channel so the
+            # bot doesn't keep stale `channel_id -> session_id` mappings pointing
+            # at now-deleted channels (which would make `_channel_ok` think a
+            # follow-up has a live session and try to route into a deleted
+            # channel). `reset` drops the binding and persists — it's the
+            # existing `unbind` equivalent, so no new SessionRouter method is
+            # needed. Wrapped per-channel so one router failure doesn't lose the
+            # deletion summary; the router-clearing as a whole is best-effort
+            # and never blocks the channel deletion itself.
+            for ch in targets:
+                try:
+                    await ch.delete(reason=f"/oc_cleanup by {ctx.author}")
+                    deleted += 1
+                except discord.HTTPException as e:
+                    failed.append(f"#{ch.name}: {e}")
+                try:
+                    if self.router.current(ch.id) is not None:
+                        await self.router.reset(ch.id)
+                except (
+                    Exception
+                ):  # noqa: BLE001 — router cleanup must not lose the summary
+                    _log.warning(
+                        "router reset for channel %s raised during /oc_cleanup",
+                        ch.id,
+                        exc_info=True,
+                    )
+            summary = f"Deleted {deleted}/{len(targets)} session channels."
+            if failed:
+                summary += "\nFailed:\n" + "\n".join(failed)
+            await ctx.followup.send(summary)
+
+        @self.slash_command(
+            name="oc_setup",
+            description="One-time setup: create the sessions category + bot channels and persist their IDs to .env.",
+        )
+        async def oc_setup(ctx: discord.ApplicationContext) -> None:
+            await self._run_setup(ctx)
+
+        @self.slash_command(
             name="oc_help", description="List the opencode bot commands."
         )
         async def oc_help(ctx: discord.ApplicationContext) -> None:
@@ -381,6 +488,14 @@ class OpencodeBot(discord.Bot):
                 "/oc_session — show this channel's current session + status.\n"
                 "/oc_sessions — list recent opencode sessions.\n"
                 "/oc_abort — abort the running session bound to this channel.\n"
+                "/oc_cleanup — delete all bot-created session channels in the "
+                "session category. Requires the Manage Channels permission. "
+                "Use to clean up the server between test sessions.\n"
+                "/oc_setup — one-time setup. Creates the 'OpenCode Sessions' "
+                "category plus the voice-recordings and bot-commands channels, "
+                "writes their IDs to .env, and restricts slash commands to the "
+                "bot-commands channel. Only runs if no guild-specific settings "
+                "are configured yet. Requires the Manage Channels permission.\n"
                 "/oc_help — this message.\n\n"
                 "**Follow-ups:** in a channel created by `/oc` or `/oc_plan`, just type a "
                 "plain-text message — it's forwarded to that channel's opencode session. "
@@ -522,6 +637,234 @@ class OpencodeBot(discord.Bot):
         if self.router.current(channel_id) is not None:
             return True
         return _channel_allowed(channel_id)
+
+    def _is_guild_configured(self) -> bool:
+        """True if ANY guild-specific Discord setting is already configured.
+
+        `/oc_setup` is a one-time setup command — it refuses to run if any of
+        the four guild-specific fields already has a non-default value, to
+        avoid silently overwriting a working setup (or creating a duplicate
+        "OpenCode Sessions" category). The "unset" sentinels:
+
+          - `discord_bot_session_category_id == 0` (config default)
+          - `discord_bot_guild_id == 0` (config default)
+          - `discord_bot_allowed_channel_ids` empty (config default)
+          - `voice_message_trigger_channel_id` is 0 OR the stale baked-in
+            default (`_STALE_DEFAULT_TRIGGER_CHANNEL_ID`) — the latter ships
+            in `config.py:107` pointing at a channel in the original dev
+            server, which a fresh guild doesn't have, so it counts as unset.
+
+        If any one of these is non-default, the bot is considered "already
+        set up" for this guild and `/oc_setup` refuses. The user must clear
+        the fields in `.env` manually to re-run setup (intentionally
+        destructive, so not exposed as a command toggle).
+        """
+        if config.discord_bot_session_category_id != 0:
+            return True
+        if config.discord_bot_guild_id != 0:
+            return True
+        if config.discord_bot_allowed_channel_ids:
+            return True
+        if config.voice_message_trigger_channel_id not in (
+            0,
+            _STALE_DEFAULT_TRIGGER_CHANNEL_ID,
+        ):
+            return True
+        return False
+
+    async def _run_setup(self, ctx: discord.ApplicationContext) -> None:
+        """`/oc_setup` — one-time guild setup.
+
+        Refuses if any guild-specific setting is already configured (see
+        `_is_guild_configured`). Otherwise:
+
+        1. Defers ephemerally (channel/category creation + `.env` write can
+           take a couple seconds).
+        2. Requires the Manage Channels permission (mirrors `/oc_cleanup`).
+        3. Creates a category named "OpenCode Sessions" in the invoking guild.
+        4. Creates two text channels at guild ROOT (NOT under the new
+           category) so `/oc_cleanup` — which deletes every text channel
+           under `discord_bot_session_category_id` — won't wipe them:
+           - `voice-recordings` — repurposed as `VOICE_MESSAGE_TRIGGER_CHANNEL_ID`
+             (voice messages posted there start new plan-author sessions).
+           - `bot-commands` — repurposed as `DISCORD_BOT_ALLOWED_CHANNEL_IDS`
+             (a one-element JSON list so slash commands are restricted to
+             this channel + bot-created session channels).
+        5. Writes the four IDs to `.env` (cwd-relative, matching
+           `BotConfig.model_config`'s `env_file=".env"`) via `env_writer`,
+           so they persist across restarts. Also writes `DISCORD_BOT_GUILD_ID`
+           from `ctx.guild.id` if it was previously unset.
+        6. Reloads the `config` singleton in place so the running bot sees
+           the new IDs immediately (no restart needed).
+        7. Replies with a summary of what was created + the IDs, and a
+           reminder to run `python -m opencode_discord_bot.sync_commands
+           --guild <id>` to (re)sync the slash-command surface (the bot
+           has `auto_sync_commands=False`, so `/oc_setup` itself won't be
+           available until the next sync).
+
+        On any `discord.HTTPException` during category/channel creation,
+        replies with an ephemeral error and does NOT write `.env` (no
+        half-state).
+        """
+        await ctx.defer(ephemeral=True)
+        # Already-setup gate: refuse if any guild-specific field is set, so a
+        # re-invocation can't silently overwrite a working setup or create a
+        # duplicate category. Ephemeral so only the caller sees the refusal.
+        if self._is_guild_configured():
+            await ctx.followup.send(
+                "Setup has already been run (at least one guild-specific "
+                "setting is configured). To re-run, clear these in `.env` "
+                "manually first:\n"
+                "- `DISCORD_BOT_SESSION_CATEGORY_ID` "
+                f"(currently `{config.discord_bot_session_category_id}`)\n"
+                "- `DISCORD_BOT_GUILD_ID` "
+                f"(currently `{config.discord_bot_guild_id}`)\n"
+                "- `DISCORD_BOT_ALLOWED_CHANNEL_IDS` "
+                f"(currently `{config.discord_bot_allowed_channel_ids}`)\n"
+                "- `VOICE_MESSAGE_TRIGGER_CHANNEL_ID` "
+                f"(currently `{config.voice_message_trigger_channel_id}`)",
+                ephemeral=True,
+            )
+            return
+        guild = ctx.guild
+        if guild is None:
+            await ctx.followup.send(
+                "This command can only be used inside a server (guild).",
+                ephemeral=True,
+            )
+            return
+        # Permission gate: creating a category + channels is guild-modifying,
+        # so restrict to members with Manage Channels (mirrors `/oc_cleanup`).
+        if not ctx.author.guild_permissions.manage_channels:
+            await ctx.followup.send(
+                "You need the Manage Channels permission to use this command.",
+                ephemeral=True,
+            )
+            return
+
+        # Create the category first so the summary can show its id even if
+        # channel creation later fails (the category is the primary artifact
+        # the user named in the request).
+        try:
+            category = await guild.create_category(
+                "OpenCode Sessions",
+                reason=f"/oc_setup by {ctx.author}",
+            )
+        except discord.HTTPException as e:
+            await ctx.followup.send(
+                f"Failed to create 'OpenCode Sessions' category: {e}",
+                ephemeral=True,
+            )
+            return
+
+        # Create the two channels at guild ROOT (no `category=` kwarg) so
+        # `/oc_cleanup` — which deletes every text channel under
+        # `discord_bot_session_category_id` — won't wipe them on a cleanup
+        # pass. Both channels are plain text channels (type 0); Discord
+        # voice channels would be type 2 and aren't needed here (the bot's
+        # `/oc_voice` joins the user's current voice channel, not a bot-owned
+        # one).
+        try:
+            recordings_ch = await guild.create_text_channel(
+                "voice-recordings",
+                reason=f"/oc_setup by {ctx.author} (voice-message trigger channel)",
+            )
+        except discord.HTTPException as e:
+            await ctx.followup.send(
+                f"Created category 'OpenCode Sessions' (id `{category.id}`) "
+                f"but failed to create the voice-recordings channel: {e}. "
+                f"The category was left in place — delete it manually if you "
+                f"want to re-run setup.",
+                ephemeral=True,
+            )
+            return
+        try:
+            commands_ch = await guild.create_text_channel(
+                "bot-commands",
+                reason=f"/oc_setup by {ctx.author} (bot commands allowlist)",
+            )
+        except discord.HTTPException as e:
+            await ctx.followup.send(
+                f"Created category 'OpenCode Sessions' (id `{category.id}`) "
+                f"and channel #voice-recordings (id `{recordings_ch.id}`), "
+                f"but failed to create the bot-commands channel: {e}. "
+                f"The category + voice-recordings channel were left in place "
+                f"— delete them manually if you want to re-run setup.",
+                ephemeral=True,
+            )
+            return
+
+        # Build the `.env` updates. Keys not present in the file are appended
+        # at the end; present keys have their values replaced in place (see
+        # `env_writer.update_env_file`). `DISCORD_BOT_ALLOWED_CHANNEL_IDS` is
+        # a JSON list per pydantic-settings v2 parsing (e.g. `[123,456]`).
+        env_path = Path.cwd() / ".env"
+        updates: dict[str, str] = {
+            "DISCORD_BOT_SESSION_CATEGORY_ID": str(category.id),
+            "VOICE_MESSAGE_TRIGGER_CHANNEL_ID": str(recordings_ch.id),
+            "DISCORD_BOT_ALLOWED_CHANNEL_IDS": f"[{commands_ch.id}]",
+        }
+        if config.discord_bot_guild_id == 0:
+            updates["DISCORD_BOT_GUILD_ID"] = str(guild.id)
+        try:
+            update_env_file(env_path, updates)
+        except OSError as e:
+            await ctx.followup.send(
+                f"Created category + channels but failed to write `.env` at "
+                f"`{env_path}`: {e}. The IDs were NOT persisted — copy them "
+                f"manually:\n"
+                f"- `DISCORD_BOT_SESSION_CATEGORY_ID={category.id}`\n"
+                f"- `VOICE_MESSAGE_TRIGGER_CHANNEL_ID={recordings_ch.id}`\n"
+                f"- `DISCORD_BOT_ALLOWED_CHANNEL_IDS=[{commands_ch.id}]`"
+                + (
+                    f"\n- `DISCORD_BOT_GUILD_ID={guild.id}`"
+                    if "DISCORD_BOT_GUILD_ID" in updates
+                    else ""
+                ),
+                ephemeral=True,
+            )
+            return
+
+        # Reload the `config` singleton in place so the running bot sees
+        # the new IDs immediately (no restart needed). `reload_config`
+        # re-reads `.env` + env vars and mutates the existing singleton via
+        # `__dict__.update`, so every module holding a reference to `config`
+        # picks up the new values.
+        try:
+            reload_config()
+        except Exception as e:  # noqa: BLE001 — reload must not kill the reply
+            _log.warning("reload_config after /oc_setup raised: %r", e)
+
+        # Summary reply (ephemeral). Includes the category id prominently
+        # (the user asked for it to be displayed), the two channel ids +
+        # their roles, and the guild-id write status. The sync reminder is
+        # necessary because `auto_sync_commands=False` (see `__init__`)
+        # means `/oc_setup` itself — and every other slash command — only
+        # becomes available after a `sync_commands` push.
+        guild_id_line = (
+            f"- `DISCORD_BOT_GUILD_ID` set to `{guild.id}` (was previously unset)\n"
+            if "DISCORD_BOT_GUILD_ID" in updates
+            else f"- `DISCORD_BOT_GUILD_ID` left at `{config.discord_bot_guild_id}` (already set)\n"
+        )
+        await ctx.followup.send(
+            "Setup complete. Created:\n"
+            f"- Category **OpenCode Sessions** → id `{category.id}`\n"
+            f"- Channel {recordings_ch.mention} → id `{recordings_ch.id}` "
+            "(set as `VOICE_MESSAGE_TRIGGER_CHANNEL_ID` — voice messages "
+            "posted here start new plan-author sessions)\n"
+            f"- Channel {commands_ch.mention} → id `{commands_ch.id}` "
+            "(set as `DISCORD_BOT_ALLOWED_CHANNEL_IDS` — slash commands now "
+            "restricted to this channel + bot-created session channels)\n"
+            + guild_id_line
+            + "\nThese IDs were written to `.env` and reloaded into the "
+            "running bot. They persist across restarts.\n\n"
+            "**Next step:** run\n"
+            f"```\npython -m opencode_discord_bot.sync_commands --guild {guild.id}\n```\n"
+            "to push the slash-command surface (including `/oc_setup`) to "
+            "this guild. Slash commands are not auto-synced on startup "
+            "(`auto_sync_commands=False`).",
+            ephemeral=True,
+        )
 
     def _voice_attachment(self, message: discord.Message) -> discord.Attachment | None:
         """Return the first transcribable attachment on `message`, else None.

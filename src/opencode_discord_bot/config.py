@@ -16,8 +16,9 @@ Env-var overrides (uppercase of the field name):
   / DISCORD_BOT_SESSION_CATEGORY_ID
   OPENCODE_SERVER_URL / OPENCODE_SERVER_PASSWORD / OPENCODE_SERVE_ENABLED
   / OPENCODE_SERVE_PORT / OPENCODE_SERVE_HOSTNAME / OPENCODE_SERVE_CORS
-  / OPENCODE_SERVE_STARTUP_TIMEOUT / OPENCODE_SERVE_CWD
-  VOICE_MESSAGE_ENABLED / VOICE_MESSAGE_TRIGGER_CHANNEL_ID
+   / OPENCODE_SERVE_STARTUP_TIMEOUT / OPENCODE_SERVE_CWD
+   OPENCODE_DEFAULT_MODEL / OPENCODE_PLAN_AUTHOR_MODEL
+   VOICE_MESSAGE_ENABLED / VOICE_MESSAGE_TRIGGER_CHANNEL_ID
   / VOICE_SILENCE_TIMEOUT_SECONDS / VOICE_CHUNK_SECONDS / VOICE_STT_PROVIDER
   / VOICE_STT_MODEL / VOICE_LOCAL_WHISPER_MODEL / VOICE_TTS_ENABLED
   / VOICE_TTS_MODEL / VOICE_TTS_VOICE / VOICE_TTS_SPEED
@@ -77,6 +78,20 @@ class BotConfig(BaseSettings):
     # (opencode's defaultDirectory resolver falls back to process.cwd() when
     # no ?directory= query / x-opencode-directory header is on the request).
     opencode_serve_cwd: str = ""
+
+    # --- model overrides (optional) ---
+    # When non-empty, the bot sends this model in the prompt body for every
+    # opencode prompt it dispatches, overriding the per-agent frontmatter
+    # `model:` field on the opencode server side. Empty = each opencode agent's
+    # own frontmatter model wins (the historical behavior). Two separate fields
+    # so the default agent (`/oc` + plain-text follow-ups, `agent=None`) and
+    # the plan-author agent (`/oc_plan`, `/oc_voice`, `/oc_talk`, voice-message
+    # trigger, Comulytic bridge) can target different models independently.
+    # Model ids are provider-scoped — e.g. `ollama-cloud/glm-5.2`,
+    # `anthropic/claude-sonnet-4`, `openai/gpt-5`. See the opencode server docs
+    # for the accepted model id format on your provider.
+    opencode_default_model: str = ""
+    opencode_plan_author_model: str = ""
 
     # --- voice messages (press-hold mic in the mobile composer) ---
     # When True, the bot transcribes Discord voice-message attachments arriving
@@ -219,3 +234,23 @@ class BotConfig(BaseSettings):
 # singleton propagate to every module. The bot process constructs ONE
 # `BotConfig` (here at import) and shares it everywhere.
 config = BotConfig()
+
+
+def reload_config() -> None:
+    """Re-read `.env` + env vars and mutate the `config` singleton in place.
+
+    Used by the `/oc_setup` slash command after it writes new guild IDs
+    (category id, channel ids, guild id) to `.env` via `env_writer`. Every
+    module that holds a reference to `config` (imported as
+    `from opencode_discord_bot.config import config`) sees the new values
+    on its next read — no re-import needed.
+
+    Constructs a fresh `BotConfig()` (which re-reads `.env` + env vars at
+    construction per `model_config = SettingsConfigDict(env_file=".env")`)
+    and copies its fields onto the existing singleton via `__dict__.update`,
+    so the singleton's identity is preserved (reference holders see the
+    update). Env-var overrides still win over `.env` values, matching the
+    normal `pydantic-settings` precedence.
+    """
+    fresh = BotConfig()
+    config.__dict__.update(fresh.model_dump())

@@ -15,13 +15,19 @@ in a session channel are forwarded to the bound opencode session.
 3. Create a Discord application + bot, invite it to your server (see
    "Invite Bot to Discord").
 4. Copy `bot/.env.example` to `.env`, fill in `DISCORD_BOT_TOKEN` and
-   `OPENCODE_SERVER_PASSWORD` (required), plus optional voice/slug keys.
+   `OPENCODE_SERVER_PASSWORD` (required), plus optional voice/slug keys and
+   model overrides.
 5. Enable the **Message Content** privileged intent in the Discord Developer
    Portal (Bot -> Privileged Gateway Intents) — without it, plain-text
    follow-ups silently break.
-6. `python -m bot` (from the repo root, or any directory if using the
+6. **Install the bundled `plan-author` opencode agent** into the project the
+   bot will run against: `python -m opencode_discord_bot.install_agent` (run
+   from that project's root, or pass `--dest <project root>`). See "Install the
+   plan-author agent" below. Skip this only if the target project already has
+   its own `plan-author` agent you want to keep.
+7. `python -m bot` (from the repo root, or any directory if using the
    standalone package).
-7. In Discord, use `/oc <your prompt>` — the bot creates a channel, runs the
+8. In Discord, use `/oc <your prompt>` — the bot creates a channel, runs the
    opencode session, and posts the response there.
 
 ## Required Dependencies
@@ -62,6 +68,8 @@ Verify: `ffmpeg -version`
 | `DISCORD_BOT_TOKEN` | **Required** | https://discord.com/developers/applications (Bot tab) | Gateway login |
 | `OPENCODE_SERVER_PASSWORD` | **Required** | Any string you choose | `opencode serve` basic auth |
 | `DISCORD_BOT_GUILD_ID` | Optional (0 = global) | Developer Mode -> right-click server -> Copy ID | Slash-command sync target |
+| `OPENCODE_DEFAULT_MODEL` | Optional | Your provider's model id (e.g. `ollama-cloud/glm-5.2`, `anthropic/claude-sonnet-4`, `openai/gpt-5`) | Override the model for `/oc` + plain-text follow-ups. Empty = the opencode default agent's frontmatter `model:` wins. |
+| `OPENCODE_PLAN_AUTHOR_MODEL` | Optional | Same as above | Override the model for `/oc_plan`, `/oc_voice`, `/oc_talk`, voice-message trigger, and the Comulytic bridge (all `agent="plan-author"`). Empty = the plan-author agent's frontmatter model wins. |
 | `OPENAI_API_KEY` | Optional | https://platform.openai.com/api-keys | TTS + cloud STT fallback (skip if `voice_tts_enabled=false` AND `voice_stt_provider=local`) |
 | `OLLAMA_AUTH_KEY` | Optional | https://ollama.com | LLM channel-name slugs (skip = regex fallback) |
 
@@ -102,6 +110,54 @@ OLLAMA_API_URL=https://ollama.com/v1
 OLLAMA_AUTH_KEY=<your ollama key>
 SLUG_MODEL=gpt-oss:20b-cloud
 ```
+
+For model overrides (optional — empty = each opencode agent's own frontmatter
+model wins):
+```env
+# Model for /oc + plain-text follow-ups (agent=None):
+OPENCODE_DEFAULT_MODEL=ollama-cloud/glm-5.2
+# Model for /oc_plan, /oc_voice, /oc_talk, voice-msg trigger, Comulytic bridge:
+OPENCODE_PLAN_AUTHOR_MODEL=anthropic/claude-sonnet-4
+```
+
+## Install the plan-author agent
+
+The bot's `/oc_plan`, `/oc_voice`, `/oc_talk`, voice-message trigger, and
+Comulytic-bridge paths all route prompts to opencode's `plan-author` agent.
+That agent is **NOT** built into opencode itself — it lives in the target
+project's `.opencode/agent/plan-author.md`. If the project doesn't have one,
+those paths will fail agent resolution on the opencode server side.
+
+This package ships a **fully generic, self-contained** plan-author agent
+(`opencode_discord_bot/agent/plan-author.md`) that works in any project — it
+reads the target project's own `AGENTS.md` if present, writes only to
+`.opencode/plans/`, and is compatible with the `change-outline` skill's
+resume/execute flow if that skill is also installed.
+
+Install it into the project the bot will run against:
+
+```bash
+# From the target project's root directory (the one opencode serve runs in):
+python -m opencode_discord_bot.install_agent
+
+# Or from anywhere, pointing at the project root:
+python -m opencode_discord_bot.install_agent --dest /path/to/your/project
+
+# Overwrite an existing plan-author.md without prompting:
+python -m opencode_discord_bot.install_agent --force
+```
+
+By default the install prompts before overwriting an existing
+`plan-author.md` so a project that has its own customized agent isn't silently
+clobbered. The agent lands at `<dest>/.opencode/agent/plan-author.md`.
+
+**Why this matters with `OPENCODE_SERVE_CWD`:** the opencode server resolves
+agents relative to its working directory (the `opencode_serve_cwd` setting,
+which defaults to the bot's launch dir). If your `.env` lives in a subdirectory
+but your project root (with `.opencode/agent/`) lives elsewhere, set
+`OPENCODE_SERVE_CWD` to the project root **and** run `install_agent --dest`
+against the same project root — otherwise the server won't find the agent
+even though you installed it.
 
 ## Invite Bot to Discord
 

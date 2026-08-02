@@ -61,12 +61,34 @@ This installs the `opencode_discord_bot` Python package and a
 | `DISCORD_BOT_TOKEN` | **Yes** | Discord bot token (https://discord.com/developers/applications) |
 | `OPENCODE_SERVER_PASSWORD` | **Yes** | Any string — protects `opencode serve` with basic auth |
 | `DISCORD_BOT_GUILD_ID` | No (0=global) | Guild id for instant slash-command sync |
+| `OPENCODE_DEFAULT_MODEL` | No | Override the model for `/oc` + plain-text follow-ups. Empty = opencode default agent's frontmatter model wins. |
+| `OPENCODE_PLAN_AUTHOR_MODEL` | No | Override the model for `/oc_plan`, `/oc_voice`, `/oc_talk`, voice-msg trigger, Comulytic bridge. Empty = plan-author frontmatter model wins. |
 | `OPENAI_API_KEY` | No | TTS + cloud STT fallback (skip if `voice_tts_enabled=false` AND `voice_stt_provider=local`) |
 | `OLLAMA_AUTH_KEY` | No | LLM channel-name slugs (skip = regex fallback) |
 
 Set these via environment variables or a `.env` file in the directory you run
 the bot from. See `.env.example` (shipped in the package / repo) for the full
 list including voice and faster-whisper settings.
+
+## Install the plan-author agent (one-time, per target project)
+
+The bot's `/oc_plan`, `/oc_voice`, `/oc_talk`, voice-message trigger, and
+Comulytic-bridge paths route prompts to opencode's `plan-author` agent. That
+agent is **not** built into opencode — it lives in the target project's
+`.opencode/agent/plan-author.md`. This package ships a generic, self-contained
+copy you can install into any project:
+
+```bash
+# From the target project's root (the one opencode serve runs against):
+python -m opencode_discord_bot.install_agent
+
+# Or from anywhere, pointing at the project root:
+python -m opencode_discord_bot.install_agent --dest /path/to/your/project
+```
+
+The agent lands at `<dest>/.opencode/agent/plan-author.md`. Run this once per
+target project. See `SETUP_GUIDE.md` "Install the plan-author agent" for
+details and the `--force` flag.
 
 ## How to run it
 
