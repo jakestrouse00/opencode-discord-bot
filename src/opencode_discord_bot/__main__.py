@@ -15,6 +15,9 @@ Run from the repo root in a separate terminal from `python main.py`:
     python bot/bot_start.py
 
 Do NOT run without a token — it exits(1) cleanly with a clear message.
+Do NOT run a second instance with the same token — `singleton.py`'s OS
+file lock catches the dual-launch and exits(1) before the gateway race
+that causes "The application did not respond" errors.
 """
 
 from __future__ import annotations
@@ -75,6 +78,23 @@ async def main() -> None:
         stream=sys.stderr,
     )
 
+    # Single-instance enforcement BEFORE importing OpencodeBot / starting
+    # the gateway. Discord allows only one gateway session per bot token;
+    # a second `python -m opencode_discord_bot` with the same token races
+    # the first for the single gateway, and whichever process receives a
+    # slash-command interaction can lose the gateway mid-dispatch (before
+    # the 3-second interaction ack) → "The application did not respond".
+    # The lock is an OS-level file lock (msvcrt on Windows, fcntl on POSIX),
+    # auto-released by the OS on process exit (even on crash), so a crashed
+    # previous instance never leaves a stale lock. See `singleton.py`.
+    from opencode_discord_bot.singleton import SingletonLock, SingletonLockError
+
+    try:
+        lock = SingletonLock.acquire_or_raise()
+    except SingletonLockError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
+
     from opencode_discord_bot.commands import OpencodeBot
 
     _log.info(
@@ -93,6 +113,11 @@ async def main() -> None:
         # subprocess (setup_hook started it). Without this, Ctrl-C before
         # the gateway is up would orphan the server.
         await bot.close()
+        # Release the singleton lock explicitly. Optional — the OS releases
+        # it on process exit regardless — but doing it here after `close()`
+        # means a fast re-launch in the same shell can acquire the lock
+        # immediately without waiting for the OS to tear down the fd.
+        lock.close()
 
 
 if __name__ == "__main__":

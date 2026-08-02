@@ -171,6 +171,16 @@ class OpencodeBot(discord.Bot):
         # sessions per guild and provides the handle for `/oc_voice_stop`.
         self._voice_sessions: dict[int, VoiceSession] = {}
         self._serve_started = False  # guards `on_connect` against reconnect re-spawn
+        # Handle for the event-loop watchdog task (spawned at the end of
+        # `on_connect`, cancelled in `close()`). A periodic `_log.info` every
+        # 60s that records "event loop alive, t=<seconds>". If the loop freezes
+        # (a synchronous call blocks asyncio), this stops printing — an instant
+        # visible signal instead of a silent stall where the bot looks alive
+        # (process running) but never heartbeats the gateway or dispatches
+        # slash-command interactions (the "The application did not respond"
+        # failure mode). See the PIPE→DEVNULL fix in `opencode_serve.py` for
+        # the deadlock this watchdog was added to catch.
+        self._watchdog_task: asyncio.Task | None = None
         # Handle for the optional in-process Comulytic bridge task (spawned in
         # `on_connect` when `config.comulytic_enabled` + `config.comulytic_jwt`
         # are set, cancelled + drained in `close()`). None when the bridge is
@@ -180,9 +190,28 @@ class OpencodeBot(discord.Bot):
         self._register_commands()
 
     def _register_commands(self) -> None:
+        # `guild_ids` MUST match what `sync_commands.py` pushes to Discord. If
+        # the bot registers commands with `guild_ids=None` (global) but
+        # `sync_commands.py` pushes them to a specific guild, Discord sends
+        # interactions with `guild_id` set, but Pycord's
+        # `process_application_commands` name-fallback requires
+        # `guild_id == cmd.guild_ids` — `None` never matches a real guild id,
+        # so the interaction silently fails to match, no callback fires, no
+        # `defer` is sent, and Discord shows "The application did not respond".
+        # Passing `[guild_id]` here keeps the bot's in-memory command map
+        # consistent with the guild-scoped registration `sync_commands.py`
+        # pushed. When `discord_bot_guild_id` is 0 (unset), fall back to None
+        # (global) — matching a global sync.
+        _guild_ids = (
+            [config.discord_bot_guild_id]
+            if config.discord_bot_guild_id
+            else None
+        )
+
         @self.slash_command(
             name="oc",
             description="Send a prompt to opencode and wait for the response.",
+            guild_ids=_guild_ids,
         )
         async def oc(
             ctx: discord.ApplicationContext,
@@ -197,6 +226,7 @@ class OpencodeBot(discord.Bot):
         @self.slash_command(
             name="oc_plan",
             description="Send a change to opencode's plan-author subagent (reasoned, plan-only).",
+            guild_ids=_guild_ids,
         )
         async def oc_plan(
             ctx: discord.ApplicationContext,
@@ -232,6 +262,7 @@ class OpencodeBot(discord.Bot):
         @self.slash_command(
             name="oc_new",
             description="Reset this channel's opencode session (start fresh).",
+            guild_ids=_guild_ids,
         )
         async def oc_new(ctx: discord.ApplicationContext) -> None:
             _log.info(
@@ -250,6 +281,7 @@ class OpencodeBot(discord.Bot):
         @self.slash_command(
             name="oc_session",
             description="Show this channel's current opencode session + status.",
+            guild_ids=_guild_ids,
         )
         async def oc_session(ctx: discord.ApplicationContext) -> None:
             _log.info(
@@ -282,7 +314,8 @@ class OpencodeBot(discord.Bot):
             )
 
         @self.slash_command(
-            name="oc_sessions", description="List recent opencode sessions."
+            name="oc_sessions", description="List recent opencode sessions.",
+            guild_ids=_guild_ids,
         )
         async def oc_sessions(ctx: discord.ApplicationContext) -> None:
             _log.info(
@@ -313,6 +346,7 @@ class OpencodeBot(discord.Bot):
         @self.slash_command(
             name="oc_abort",
             description="Abort the running opencode session bound to this channel.",
+            guild_ids=_guild_ids,
         )
         async def oc_abort(ctx: discord.ApplicationContext) -> None:
             _log.info(
@@ -338,6 +372,7 @@ class OpencodeBot(discord.Bot):
         @self.slash_command(
             name="oc_voice",
             description="Join a voice channel, transcribe your spoken plan/note, route to plan-author.",
+            guild_ids=_guild_ids,
         )
         async def oc_voice(
             ctx: discord.ApplicationContext,
@@ -369,6 +404,7 @@ class OpencodeBot(discord.Bot):
         @self.slash_command(
             name="oc_voice_stop",
             description="Manually stop the active voice session and process the transcript.",
+            guild_ids=_guild_ids,
         )
         async def oc_voice_stop(ctx: discord.ApplicationContext) -> None:
             _log.info(
@@ -392,6 +428,7 @@ class OpencodeBot(discord.Bot):
         @self.slash_command(
             name="oc_talk",
             description="Upload an audio/video recording of your thoughts; extract audio, transcribe, route to plan-author.",
+            guild_ids=_guild_ids,
         )
         async def oc_talk(
             ctx: discord.ApplicationContext,
@@ -426,6 +463,7 @@ class OpencodeBot(discord.Bot):
         @self.slash_command(
             name="oc_cleanup",
             description="Delete all bot-created session channels in the session category.",
+            guild_ids=_guild_ids,
         )
         async def oc_cleanup(ctx: discord.ApplicationContext) -> None:
             _log.info(
@@ -527,6 +565,7 @@ class OpencodeBot(discord.Bot):
         @self.slash_command(
             name="oc_setup",
             description="One-time setup: create the sessions category + bot channels and persist their IDs to .env.",
+            guild_ids=_guild_ids,
         )
         async def oc_setup(ctx: discord.ApplicationContext) -> None:
             _log.info(
@@ -538,7 +577,8 @@ class OpencodeBot(discord.Bot):
             await self._run_setup(ctx)
 
         @self.slash_command(
-            name="oc_help", description="List the opencode bot commands."
+            name="oc_help", description="List the opencode bot commands.",
+            guild_ids=_guild_ids,
         )
         async def oc_help(ctx: discord.ApplicationContext) -> None:
             _log.info(
@@ -588,6 +628,29 @@ class OpencodeBot(discord.Bot):
                 "One follow-up at a time (a busy session replies with a wait notice)."
             )
             await ctx.respond(text)
+
+    async def on_interaction(self, interaction: discord.Interaction) -> None:
+        # TEMP diagnostic: log every interaction arrival so we can see whether
+        # slash-command dispatches reach the bot at all (regardless of whether
+        # process_application_commands finds a match). Without this, a command-
+        # ID mismatch silently drops the interaction with no log, producing
+        # "The application did not respond" with no clue. Remove once the
+        # dispatch issue is resolved.
+        try:
+            data = interaction.data or {}
+            name = data.get("name") or data.get("custom_id") or "?"
+            cmd_id = data.get("id", "?")
+            _log.info(
+                "on_interaction: type=%s id=%s name=%s guild=%s channel=%s",
+                interaction.type,
+                cmd_id,
+                name,
+                interaction.guild_id,
+                interaction.channel_id,
+            )
+        except Exception:  # noqa: BLE001 — diagnostic must not break dispatch
+            _log.warning("on_interaction diagnostic log raised", exc_info=True)
+        await self.process_application_commands(interaction)
 
     async def on_connect(self) -> None:
         """Start `opencode serve` after the gateway connects.
@@ -666,6 +729,29 @@ class OpencodeBot(discord.Bot):
             self._bridge_task = asyncio.create_task(_bridge_guard())
             _log.info("comulytic bridge auto-started (in-process task)")
 
+        # Event-loop watchdog: log "event loop alive" every 60s. If the loop
+        # freezes (a blocking call stalls asyncio), this stops printing — a
+        # visible signal instead of a silent stall. Guarded by `is None` so a
+        # reconnect re-spawn doesn't create a second watchdog. Cancelled in
+        # `close()` before the bridge + serve teardown.
+        if self._watchdog_task is None:
+            watchdog_start = time.monotonic()
+
+            async def _event_loop_watchdog() -> None:
+                try:
+                    while True:
+                        await asyncio.sleep(60.0)
+                        _log.info(
+                            "event loop alive, t=%.0fs",
+                            time.monotonic() - watchdog_start,
+                        )
+                except asyncio.CancelledError:
+                    raise  # close() cancels cleanly
+                except Exception:  # noqa: BLE001 — watchdog must not kill the bot
+                    _log.exception("event-loop watchdog crashed")
+
+            self._watchdog_task = asyncio.create_task(_event_loop_watchdog())
+
     async def close(self) -> None:
         """Stop voice sessions + the opencode serve subprocess, then close the gateway.
 
@@ -691,6 +777,16 @@ class OpencodeBot(discord.Bot):
         # can't hang shutdown; on timeout we give up and the task is abandoned
         # (the process is exiting anyway, so orphaned clients are reaped by the
         # OS). `CancelledError` is expected and swallowed.
+        # Cancel the event-loop watchdog FIRST so it doesn't log "event loop
+        # alive" during the shutdown sequence (which would be noise). Drain it
+        # with a short ceiling so a stuck sleep can't hang shutdown.
+        if self._watchdog_task is not None:
+            self._watchdog_task.cancel()
+            try:
+                await asyncio.wait_for(self._watchdog_task, timeout=2.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                pass
+            self._watchdog_task = None
         if self._bridge_task is not None:
             self._bridge_task.cancel()
             try:

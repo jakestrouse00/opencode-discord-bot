@@ -302,8 +302,20 @@ class OpencodeServe:
             cmd += ["--cors", origin]
 
         popen_kwargs: dict = {
-            "stdout": subprocess.PIPE,
-            "stderr": subprocess.STDOUT,
+            # DEVNULL, NOT PIPE: nobody drains `self._proc.stdout` during normal
+            # operation (only `_drain_output_to_stderr` reads it, and only when
+            # the proc dies early). A PIPE would fill its OS buffer (~64KB on
+            # Windows) once `opencode serve` logs enough output, blocking the
+            # serve subprocess on its next write — which blocks `start()`'s
+            # `_wait_healthy` thread (waiting on the proc) and freezes the bot's
+            # event loop (the classic subprocess.PIPE deadlock). DEVNULL
+            # discards serve output at the OS level with no reader needed, so
+            # the serve subprocess can never block on write. If serve logs are
+            # wanted later, redirect to a real file handle (the OS appends
+            # without blocking the writer) — never PIPE unless a reader task is
+            # actively draining it.
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
             "stdin": subprocess.DEVNULL,
             # Pin the subprocess cwd so the server's `process.cwd()` resolves
             # to the user's project. `opencode serve` has no `--cwd` flag and
@@ -397,9 +409,10 @@ class OpencodeServe:
         auth_header = self._auth_header()
         while time.monotonic() < deadline:
             if self._proc is not None and self._proc.poll() is not None:
-                # Process exited before becoming healthy — drain its output so
-                # the user can see why (e.g. port already in use).
-                self._drain_output_to_stderr()
+                # Process exited before becoming healthy. With DEVNULL stdout
+                # there's no buffered output to drain (see start() popen_kwargs),
+                # so just report the early exit and fall through to the timeout
+                # path, which stops the server and logs the issue.
                 return False
             try:
                 req = urllib.request.Request(
@@ -421,17 +434,6 @@ class OpencodeServe:
                 pass
             time.sleep(0.25)
         return False
-
-    def _drain_output_to_stderr(self) -> None:
-        """Copy any buffered subprocess stdout/stderr to our stderr (best-effort)."""
-        if self._proc is None or self._proc.stdout is None:
-            return
-        try:
-            out = self._proc.stdout.read(4000)
-            if out:
-                sys.stderr.write(out.decode("utf-8", errors="replace"))
-        except Exception:  # noqa: BLE001 — teardown/diagnostic path must not raise
-            pass
 
     def stop(self) -> None:
         """Tear down the subprocess tree. Idempotent; never raises.
@@ -488,8 +490,12 @@ class OpencodeServe:
             self._proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             pass
+        # With DEVNULL stdout (see start() popen_kwargs) `self._proc.stdout` is
+        # None, so there's nothing to close. Kept as a defensive guard in case a
+        # future change swaps DEVNULL back to a real handle.
         try:
-            self._proc.stdout.close() if self._proc.stdout else None
+            if self._proc.stdout is not None:
+                self._proc.stdout.close()
         except Exception:  # noqa: BLE001
             pass
         self._proc = None
