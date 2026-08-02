@@ -6,6 +6,44 @@ audio — all via slash commands. Each `/oc` invocation creates a fresh
 opencode session in a fresh Discord channel; subsequent plain-text messages
 in that channel are forwarded as follow-up prompts.
 
+## Install via an AI agent
+
+Want an AI agent to install and configure this bot for you? Copy the
+prompt below into your LLM (opencode, Claude, ChatGPT, Cursor, etc.). It
+walks the agent through the whole setup end-to-end, deferring the manual
+Discord Developer Portal steps to you.
+
+```
+Install and set up the opencode-discord-bot project on my machine from
+scratch (a two-way Discord gateway for opencode; uses Pycord 2.8.1, NOT
+discord.py).
+
+1. Get the source code if I don't already have it:
+   `git clone https://github.com/jakestrouse00/opencode-discord-bot.git`
+   Then work from inside that cloned repo directory. (You can also pip
+   install it directly via
+   `pip install git+https://github.com/jakestrouse00/opencode-discord-bot.git`,
+   but clone it so you have README.md, SETUP_GUIDE.md, and AGENTS.md on
+   disk to read.)
+
+2. For the full procedure, read these three files in the repo and follow
+   them in order: README.md -> SETUP_GUIDE.md -> AGENTS.md. They cover the
+   system deps (Python 3.13+, ffmpeg, opencode on PATH), the pip install
+   (`pip install -e .` from the clone, or the pip+git line above), the
+   Discord Developer Portal bot creation + invite + Message Content
+   intent, the .env file (DISCORD_BOT_TOKEN and OPENCODE_SERVER_PASSWORD
+   required), running, and syncing slash commands.
+
+3. Walk me through the manual Discord Developer Portal steps - do those
+   with me, not for me. Before finishing: verify the import
+   (`python -c "from opencode_discord_bot.commands import OpencodeBot; print('ok')"`),
+   sync slash commands once
+   (`python -m opencode_discord_bot.sync_commands --guild <guild id>`), and
+   do NOT leave the bot running in the foreground / blocking. Note
+   /oc_voice recording is currently broken (Pycord 2.8.1 + Discord DAVE
+   E2EE) - mention it but don't try to fix it.
+```
+
 ## Quick Start
 
 ### 1. Install

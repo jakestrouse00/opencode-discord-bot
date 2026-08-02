@@ -38,7 +38,8 @@ pip install -r bot/requirements.txt
 Installs: `py-cord[voice]` (Discord gateway, Pycord 2.8.1), `httpx` (REST
 client), `pydantic-settings` (config), `PyNaCl` (voice crypto),
 `audioop-lts` (Python 3.13 audio dep), `faster-whisper` + `ctranslate2`
-(local STT), `openai` (TTS + cloud STT fallback).
+(local STT — used by `/oc_voice`, `/oc_talk`, voice messages, AND the
+Comulytic bridge), `openai` (TTS + cloud STT fallback).
 
 ### ffmpeg (system dependency — NOT pip-installable)
 `ffmpeg` must be on your `PATH`. The bot uses it for:
@@ -211,6 +212,214 @@ After setup, verify each piece:
 - [ ] `/oc hello` in Discord creates a channel and responds.
 - [ ] (Optional) `/oc_voice` joins a voice channel and transcribes your speech.
 - [ ] (Optional) `/oc_talk` with an audio attachment transcribes it.
+
+## Comulytic bridge (optional, polling-based)
+
+The Comulytic bridge is a separate long-running process that polls Comulytic's
+cloud API for new Note Pro recordings, downloads each recording's audio, and
+transcribes it LOCALLY via faster-whisper (the same pipeline `/oc_talk` uses),
+then routes the transcript to opencode's `plan-author` agent — no manual
+Discord upload, no phone-side automation, no Comulytic cloud ASR. It runs
+independently of the Discord bot (`python -m opencode_discord_bot`) but is
+also auto-spawned in-process by the bot when `COMULYTIC_ENABLED=true` +
+`COMULYTIC_JWT` are set (see the bot's `AGENTS.md`).
+
+### Enable the bridge
+
+The bridge is **disabled by default**. To enable it, set in your `.env`:
+
+```
+COMULYTIC_ENABLED=true
+COMULYTIC_JWT=<paste the 150-day access JWT here>
+```
+
+When `COMULYTIC_ENABLED` is unset/false, the bridge exits immediately at
+startup with a clear message — the feature is fully OFF. To disable it
+again, just remove (or set to `false`) the `COMULYTIC_ENABLED` line in your
+`.env` and restart the bridge.
+
+### Capture the JWT + refresh token
+
+The bridge needs a Bearer JWT captured from a real login at
+`web.comulytic.ai`. The JWT is HS256 (server-held symmetric secret — the
+bridge cannot self-sign it) and has a **150-day TTL** (`expiresIn: 12960000`
+in the login response). A **365-day `refreshToken`** is also returned
+alongside it; persist it too (the refresh *call* is a capture gap — see
+"JWT expiry" below).
+
+**Preferred (scriptable, non-interactive) — email+password:**
+
+1. Sign in at `web.comulytic.ai` using email+password.
+2. Open browser DevTools → Network tab BEFORE clicking sign-in.
+3. Perform the login.
+4. Find the `POST /api/kirby/v1/auth/login/email` request (preceded by
+   `POST /api/kirby/v1/auth/exist/email` pre-check).
+5. Copy `data.accessToken` (the 150-day access JWT) → `COMULYTIC_JWT`.
+6. Copy `data.refreshToken` (the 365-day refresh JWT) →
+   `COMULYTIC_REFRESH_TOKEN`.
+7. Copy `data.user.userId` and verify it matches the JWT `sub` claim.
+
+**Alternative (Apple social, browser-only):** "Continue with Apple"
+triggers `POST /api/kirby/v1/auth/exist/socialAccount` (pre-check) then
+`POST /api/kirby/v1/auth/social/login`. Same response shape
+`{data:{accessToken, refreshToken, ...}}`. Apple id_tokens have a 1-day TTL
+the bridge cannot mint autonomously, so prefer the email path for automation.
+
+### Run the bridge
+
+```
+COMULYTIC_ENABLED=true COMULYTIC_JWT=<...> COMULYTIC_REFRESH_TOKEN=<...> comulytic-bridge
+```
+
+(or `python -m opencode_discord_bot.bridge`). The bridge spawns its own
+`opencode serve` subprocess (reuses a running one if the Discord bot is
+running simultaneously — no port conflict). It logs to stderr in the same
+format as the bot.
+
+### How it works
+
+- **Polling:** polls `POST /api/kirby/v2/note/paging` every
+  `COMULYTIC_POLL_INTERVAL_SECONDS` (default 60s). A cheap `pageSize:1`
+  change-detect call returns `total` + the newest `noteId`; full enumeration
+  only when `total` changes. Lower to 15-30s if latency matters.
+- **Bootstrap-seen:** the first run marks all currently-existing recordings
+  as seen WITHOUT processing them; only recordings created AFTER bridge
+  start get routed (no one-time backlog flood).
+- **Audio-delivery predicate:** audio download is gated on
+  `hasCloudAudio == true AND audioAccess == "public"` (an AI-pipeline-agnostic
+  audio-delivery signal). A recording can be audio-delivered before its
+  Comulytic cloud transcript is ready (or even if that transcript fails) —
+  the bridge no longer cares, since it transcribes locally (see below).
+- **Transcription is LOCAL Whisper only:** the bridge NEVER consults
+  Comulytic's cloud ASR (`queryTranscribeResult` / `asrResultVO`). For every
+  audio-delivered recording it downloads the audio and runs the SAME
+  pipeline `/oc_talk` uses — `voice.extract_audio_to_wav` (ffmpeg → mono
+  16kHz WAV) + `voice.transcribe_audio`. `transcribe_audio` dispatches on
+  `voice_stt_provider`: `"local"` (default) = in-process faster-whisper
+  CTranslate2 (no cloud API, no per-request cost, privacy-preserving),
+  `"openai"` = cloud Whisper API, `"auto"` = local first, cloud fallback.
+  The old `COMULYTIC_AUDIO_FALLBACK` flag (cloud ASR primary, local Whisper
+  fallback) is GONE — local Whisper is the sole path, so the flag is moot.
+- **Audio download paths:** default **Path B** (cookie-auth proxy at
+  `web.comulytic.ai/api/note/audio-range/{noteId}` — stable, no per-URL
+  expiry, only the JWT cookie rotates) with **Path A** (pre-signed S3 via
+  `noteDetail`, 48h TTL, re-mint each cycle) as fallback. Override via
+  `COMULYTIC_AUDIO_PATH=presigned` to force Path A.
+
+### JWT expiry
+
+The bridge warns `COMULYTIC_RELOGIN_WARN_DAYS` (default 1) before the
+access-JWT `exp`. The 365-day `refreshToken` exists and is persisted, BUT the
+refresh *call* (endpoint path/body) was NOT captured in the HAR investigation
+— until re-captured, the bridge treats the access JWT as non-refreshable and
+re-runs the full login (`/auth/login/email` preferred) before `exp`. On
+expiry all calls 401 and the bridge effectively goes silent (polls fail,
+logs errors, no new recordings routed). Schedule a calendar reminder for
+~1 day before `exp` (the bridge logs the expiry date on startup). A future
+HAR capturing the refresh exchange would close this gap and enable proactive
+refresh at `exp − 24h` with no code changes.
+
+### `acw_tc` cookie-jar behavior
+
+The `acw_tc` cookie is a passive challenge token (Aliyun WAF), 30-min Max-Age,
+HttpOnly, auto-minted on every qualifying API response even when none was
+pre-sent. The bridge's `httpx.AsyncClient` cookie jar captures + resends it
+automatically (no manual cookie handling). If the bridge idles >30 min, the
+next request gets a fresh `Set-Cookie` automatically.
+
+### Rate limits
+
+Effectively unbounded (`x-ratelimit-limit: 999999999`, no 429/`Retry-After`
+observed in capture), but the bridge honors `x-ratelimit-remaining`/`reset`
++ `Retry-After` defensively in case real limits appear. The 60s default
+cadence is conservative.
+
+### Push mode (follow-up, NOT implemented)
+
+The bridge probes `GET /api/openapi/v1/api-keys/developer-tab/visibility`
+once on startup. If `.data.visible == true`, it logs a NOTICE that push mode
+is available for this account (inbound webhook delivery instead of polling).
+Implementing the push receiver (inbound FastAPI endpoint + HMAC verification
++ `fastapi`/`uvicorn` deps + webhook registration) is a follow-up plan — the
+polling bridge continues to run regardless of the probe result.
+
+### Comulytic bridge → Discord channel (mirrors `/oc_talk`)
+
+When `DISCORD_BOT_TOKEN` + `DISCORD_BOT_GUILD_ID` are set (the same values
+the main bot uses — the bridge reads them from the same `.env`), the bridge
+additionally creates a Discord text channel for each routed recording and
+posts the plan-author conversation there — just like `/oc_talk`, but with
+Comulytic as the audio source instead of a Discord attachment.
+
+**Flow:** when a new Comulytic recording's audio is downloaded and locally
+transcribed (faster-whisper), the bridge:
+
+1. Creates an opencode session titled `comulytic-<shortNoteId>`.
+2. Creates a Discord text channel under `DISCORD_BOT_SESSION_CATEGORY_ID`
+   (the same category the main bot uses for `/oc` / `/oc_talk` channels), with
+   an initial regex slug derived from the transcript (e.g.
+   `comulytic-1bb61861`), topic `opencode comulytic session <sid> (note <id>)`.
+3. Binds the channel to the session in a SEPARATE persistence file
+   (`.opencode-discord-bridge-sessions.json`, gitignored) so the bridge and
+   the main bot don't clobber each other's writes.
+4. Posts the transcript in the channel under a `**Transcribed prompt:**`
+   header.
+5. Fires a fire-and-forget LLM slug rename (one short chat completion on the
+   small cloud model via `SLUG_MODEL` + `OLLAMA_AUTH_KEY`) to upgrade the
+   channel name from the regex slug to a real LLM-generated slug.
+6. Posts a `Working on session <sid>…` progress message (throttled progress
+   edits while plan-author runs).
+7. Sends the transcript to `plan-author` (optionally prepended with a
+   `[PLAN_TYPE_PRESELECTED: ...]` directive when `COMULYTIC_PLAN_TYPE` is set).
+8. Surfaces any plan-author clarifying questions as plain-text prompts in the
+   channel (numbered options + a timeout) and polls
+   `GET /channels/{id}/messages` for the user's plain-text reply. The user
+   types a number or any text; the bridge parses it and calls
+   `reply_question` / `reject_question` to unblock the agent turn.
+9. Posts the final plan-author response in the channel (chunked into
+   ≤2000-char pieces).
+10. Optionally posts a `Created <#channelId>` pointer to
+    `COMULYTIC_DISCORD_POINTER_CHANNEL_ID` (a "firehose" channel to watch for
+    new bridge activity; 0 = no pointer).
+
+**No Pycord, no gateway.** The bridge talks to Discord via raw REST
+(`POST /guilds/{id}/channels`, `POST /channels/{id}/messages`, etc.) using the
+bot token in the `Authorization` header. It does NOT connect to the Discord
+gateway — Discord allows only one gateway connection per bot token, so the
+bridge connecting would kick the main bot's connection into a reconnect loop.
+Raw REST is safe to run alongside the main bot (REST rate limits are
+per-token, but channel creation + a few messages per recording is low-volume).
+
+**Bot permissions:** the bot needs `Manage Channels` (to create the text
+channel), `Send Messages` (to post the transcript + response), `Read Message
+History` (to poll for the user's plain-text replies to questions), and
+`Manage Messages` (to edit the progress message) in the
+`DISCORD_BOT_SESSION_CATEGORY_ID` category. These are the same permissions
+the main bot already needs for `/oc` / `/oc_talk`.
+
+**Plain-text follow-ups are a follow-on.** The bridge binds its channels in
+a separate file that the main bot doesn't read, so plain-text follow-ups in
+bridge-created channels do NOT route through the main bot's `on_message`
+follow-up path. To follow up in a bridge-created channel, use `/oc_new` (or
+re-run the recording). Wiring the bridge's channels into the main bot's
+follow-up path is a future enhancement (the bridge would need to either poll
+its channels for new messages, or share the SessionRouter file with locking).
+
+**Graceful degradation.** If `DISCORD_BOT_TOKEN` is empty or
+`DISCORD_BOT_GUILD_ID` is 0, the bridge routes to plan-author and LOGs the
+response only (the original behavior). A WARNING is logged on startup. No
+Discord channel is created. This is the default if you only set the Comulytic
+env vars and not the Discord ones.
+
+**New env vars:**
+- `COMULYTIC_DISCORD_POINTER_CHANNEL_ID` (default 0): channel id to post the
+  `Created <#channel>` pointer in. 0 = no pointer.
+- `COMULYTIC_QUESTION_TIMEOUT_SECONDS` (default 300): how long to wait for
+  the user's plain-text reply to a plan-author clarifying question before
+  rejecting it (unblocking the agent). The main bot uses buttons that wait
+  indefinitely; plain-text polling needs a ceiling.
+- `COMULYTIC_QUESTION_POLL_INTERVAL_SECONDS` (default 2.0): poll cadence for
+  `GET /question` + `GET /permission` while plan-author runs.
 
 ## Troubleshooting Commands
 

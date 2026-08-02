@@ -50,6 +50,7 @@ Repository = "https://github.com/jakestrouse00/opencode-discord-bot"
 
 [project.scripts]
 opencode-discord-bot = "opencode_discord_bot.__main__:main"
+comulytic-bridge = "opencode_discord_bot.bridge:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/opencode_discord_bot"]

@@ -24,6 +24,13 @@ Env-var overrides (uppercase of the field name):
   WHISPER_MODEL / WHISPER_DEVICE / WHISPER_COMPUTE_TYPE
   OPENAI_API_KEY
   OLLAMA_API_URL / OLLAMA_AUTH_KEY / SLUG_MODEL / SLUG_TIMEOUT_SECONDS
+  COMULYTIC_ENABLED / COMULYTIC_JWT / COMULYTIC_REFRESH_TOKEN
+  / COMULYTIC_API_BASE / COMULYTIC_WEB_BASE / COMULYTIC_AUDIO_PATH
+  / COMULYTIC_POLL_INTERVAL_SECONDS / COMULYTIC_POLL_PAGE_SIZE
+   / COMULYTIC_USER_AGENT / COMULYTIC_PLAN_TYPE / COMULYTIC_RELOGIN_WARN_DAYS
+   / COMULYTIC_STATE_FILE / COMULYTIC_DISCORD_POINTER_CHANNEL_ID
+   / COMULYTIC_QUESTION_TIMEOUT_SECONDS
+   / COMULYTIC_QUESTION_POLL_INTERVAL_SECONDS
 """
 
 from __future__ import annotations
@@ -126,6 +133,85 @@ class BotConfig(BaseSettings):
     ollama_auth_key: str = ""
     slug_model: str = "gpt-oss:20b-cloud"
     slug_timeout_seconds: float = 8.0
+
+    # --- Comulytic cloud bridge (polling-based, optional) ---
+    # MASTER ENABLE for the Comulytic bridge. Default False = the bridge
+    # process (`python -m opencode_discord_bot.bridge` or the
+    # `comulytic-bridge` console script) refuses to start, so the feature is
+    # fully OFF by default. Flip to True via the `.env` file or env var:
+    #   COMULYTIC_ENABLED=true
+    # to activate polling + plan-author routing. When False, the bridge
+    # exits immediately at startup with a clear message (see `bridge.main`).
+    # Even when this is True, the bridge still requires `comulytic_jwt` to
+    # be set — if the JWT is empty it exits with a different clear message.
+    comulytic_enabled: bool = False
+    # Bearer JWT captured from a real login at web.comulytic.ai.
+    # HS256, 150-day TTL. AEIYDDL confirmed the login exchange:
+    #   POST /api/kirby/v1/auth/social/login (Apple) or
+    #   POST /api/kirby/v1/auth/login/email (email+password, scriptable, preferred
+    #   for automation) returns {data:{accessToken, refreshToken, tokenType:"bearer",
+    #   expiresIn:12960000, user:{...}}}. The 365-day refreshToken EXISTS but the
+    #   refresh *call* (endpoint path/body) is a capture gap — until re-captured,
+    #   re-login via /auth/login/email before exp. See SETUP_GUIDE.md "Comulytic
+    #   bridge" section for capture instructions.
+    comulytic_jwt: str = ""
+    # The 365-day refreshToken returned alongside the access JWT by social/login
+    # (or login/email). Persisted for future use once the refresh endpoint call is
+    # captured. Empty = not captured; the bridge treats the access JWT as
+    # non-refreshable and warns before exp instead.
+    comulytic_refresh_token: str = ""
+    # Base URL of the Comulytic cloud API (Bearer JWT host).
+    comulytic_api_base: str = "https://api.comulytic.ai"
+    # Base URL of the web app (audio proxy host for Path B). The audio-range
+    # proxy serves the complete MP3 via a stable noteId-based URL with no embedded
+    # expiry; only the Bearer JWT cookie (~150 days) rotates.
+    comulytic_web_base: str = "https://web.comulytic.ai"
+    # Audio download path priority: "proxy" (Path B — cookie-auth proxy at
+    # web.comulytic.ai/api/note/audio-range/{noteId}, RECOMMENDED — no per-URL
+    # expiry) | "presigned" (Path A — pre-signed S3 URL via noteDetail, 48h TTL,
+    # re-mint each cycle). Default "proxy" per the consolidated report's
+    # synthesis (AEIYDDL's strongest recommendation). Path A is the fallback.
+    comulytic_audio_path: str = "proxy"
+    # How often (seconds) to probe /note/paging for new recordings. Cheap
+    # probe (pageSize:1) returns total + newest noteId; full enumerate only
+    # when total changes. Comulytic's web client polls ~15s; 60s is
+    # conservative for an autonomous bridge (fewer API calls, less WAF
+    # attention). Lower to 15-30s if latency matters.
+    comulytic_poll_interval_seconds: float = 60.0
+    # Page size for full enumeration when total changes (Comulytic default 20).
+    comulytic_poll_page_size: int = 20
+    # Value of the x-device-model AND User-Agent headers. Empty = the bridge
+    # derives a stable desktop Chrome UA at startup. Must match the UA used
+    # during JWT capture to minimize fingerprint mismatch.
+    comulytic_user_agent: str = ""
+    # Directive sent to plan-author: "" (let plan-author classify) |
+    # "actionable" | "note". Mirrors the [PLAN_TYPE_PRESELECTED] directive
+    # from bot/commands.py.
+    comulytic_plan_type: str = ""
+    # Warn N days before JWT exp (logged on startup + each poll cycle if
+    # close). The consolidated report recommends proactive refresh at exp-24h
+    # once the refresh endpoint is confirmed; until then, re-login via
+    # /auth/login/email ~1-7 days before exp (the refresh *call* is a gap).
+    comulytic_relogin_warn_days: float = 1.0
+    # Path to the seen-set state file (noteIds already processed). Relative
+    # paths resolve against the bridge's cwd. Gitignored — runtime state.
+    comulytic_state_file: str = ".comulytic-seen.json"
+
+    # --- Comulytic bridge -> Discord channel (mirrors /oc_talk) ---
+    # When non-zero, the bridge posts a "Created #channel" pointer to this
+    # channel id when it routes a new recording to plan-author (mirrors
+    # /oc_talk's ctx.followup.send pointer). 0 = no pointer; the created
+    # channel is the sole discoverability surface. Useful when you want a
+    # single "firehose" channel to watch for new bridge activity.
+    comulytic_discord_pointer_channel_id: int = 0
+    # How long (seconds) to wait for the user's plain-text reply to a
+    # plan-author clarifying question in the bridge's Discord channel before
+    # rejecting it (unblocking the agent). The main bot uses buttons that
+    # wait indefinitely; plain-text polling needs a ceiling. 300s = 5 min.
+    comulytic_question_timeout_seconds: float = 300.0
+    # How often (seconds) to poll GET /question + GET /permission while the
+    # plan-author session is running. Matches the main bot's 2.0s cadence.
+    comulytic_question_poll_interval_seconds: float = 2.0
 
 
 # Module-level singleton. Importers read `config.<field>` (NOT a fresh

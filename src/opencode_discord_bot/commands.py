@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 import time
 from typing import Any, Awaitable, Callable
 
@@ -43,6 +42,14 @@ from opencode_discord_bot.opencode_client import OpencodeClient, OpencodeError
 from opencode_discord_bot.questions import poll_pending_requests
 from opencode_discord_bot.session_router import SessionRouter
 from opencode_discord_bot.slug import aclose_slug_client, generate_slug
+from opencode_discord_bot.text_utils import (
+    DISCORD_MSG_MAX,
+    _CHANNEL_NAME_MAX,
+    _extract_text,
+    _final_assistant_text,
+    _slugify_prompt,
+    _split_message,
+)
 from opencode_discord_bot.voice import (
     VoiceSession,
     extract_audio_to_wav,
@@ -54,64 +61,10 @@ from opencode_discord_bot.config import config
 
 _log = logging.getLogger("bot.commands")
 
-# Discord message length cap (hard API limit). Long opencode responses must be
-# split into chunks at most this long.
-DISCORD_MSG_MAX = 2000
-
 # Throttle for editing the "working…" progress message. discord.py's
 # Message.edit is rate-limited (~5 edits/5s per channel); editing on every SSE
 # event (dozens/sec during tool execution) would trip 429s. ~2s is safe.
 PROGRESS_EDIT_MIN_INTERVAL = 2.0
-
-
-def _split_message(text: str, limit: int = DISCORD_MSG_MAX) -> list[str]:
-    """Split a long string into <=limit chunks, preferring code-block / newline boundaries.
-
-    Order of preference: code-fence boundaries (```), double newlines, single
-    newlines, then hard char splits. Each chunk is <= limit. Never returns an
-    empty list (returns [""] for empty input).
-    """
-    if not text:
-        return [""]
-    chunks: list[str] = []
-    remaining = text
-    while remaining:
-        if len(remaining) <= limit:
-            chunks.append(remaining)
-            break
-        # try to split on a code-fence boundary near the limit
-        cut = -1
-        fence = remaining.rfind("\n```", 0, limit)
-        if fence != -1:
-            # include the closing fence line in this chunk
-            cut = fence + 4
-        else:
-            para = remaining.rfind("\n\n", 0, limit)
-            if para != -1:
-                cut = para + 2
-            else:
-                nl = remaining.rfind("\n", 0, limit)
-                if nl != -1:
-                    cut = nl + 1
-                else:
-                    # last resort: hard split at limit
-                    cut = limit
-        chunks.append(remaining[:cut])
-        remaining = remaining[cut:]
-    return chunks
-
-
-def _extract_text(parts: list[dict]) -> str:
-    """Concatenate all text parts from an opencode message's `parts` array."""
-    out: list[str] = []
-    for part in parts:
-        if not isinstance(part, dict):
-            continue
-        if part.get("type") == "text":
-            t = part.get("text")
-            if t:
-                out.append(t)
-    return "\n".join(out) if out else ""
 
 
 def _channel_allowed(channel_id: int) -> bool:
@@ -125,27 +78,6 @@ async def _deny(interaction: discord.Interaction) -> None:
     await interaction.response.send_message(
         "This channel is not allowed for the opencode bot.", ephemeral=True
     )
-
-
-# Discord text-channel name length cap (hard API limit).
-_CHANNEL_NAME_MAX = 100
-
-
-def _slugify_prompt(prompt: str, fallback: str) -> str:
-    """Turn a prompt into a Discord channel name slug.
-
-    Takes the first ~6 words, lowercases, collapses non-[a-z0-9-] runs to
-    single hyphens, strips leading/trailing hyphens, and caps at
-    `_CHANNEL_NAME_MAX` chars. Returns `fallback` if the prompt yields no
-    usable slug (empty, all-symbols, etc.).
-    """
-    words = prompt.split()[:6]
-    slug = "-".join(words).lower()
-    slug = re.sub(r"[^a-z0-9-]+", "-", slug)
-    slug = re.sub(r"-{2,}", "-", slug).strip("-")
-    if not slug:
-        return fallback
-    return slug[:_CHANNEL_NAME_MAX]
 
 
 class OpencodeBot(discord.Bot):
@@ -220,6 +152,12 @@ class OpencodeBot(discord.Bot):
         # sessions per guild and provides the handle for `/oc_voice_stop`.
         self._voice_sessions: dict[int, VoiceSession] = {}
         self._serve_started = False  # guards `on_connect` against reconnect re-spawn
+        # Handle for the optional in-process Comulytic bridge task (spawned in
+        # `on_connect` when `config.comulytic_enabled` + `config.comulytic_jwt`
+        # are set, cancelled + drained in `close()`). None when the bridge is
+        # disabled or not yet started; guards against a reconnect re-spawn
+        # (mirrors `_serve_started`).
+        self._bridge_task: asyncio.Task | None = None
         self._register_commands()
 
     def _register_commands(self) -> None:
@@ -495,6 +433,38 @@ class OpencodeBot(discord.Bot):
             # check window (up to startup_timeout seconds).
             await asyncio.to_thread(self._serve.start)
 
+        # Auto-spawn the Comulytic bridge as an in-process task, gated on
+        # config. Calls `run_bridge()` directly (NOT `main()` — `main()` calls
+        # `asyncio.run(...)` which creates a new event loop, fatal inside the
+        # bot's running loop, and reconfigures the root logger via
+        # `logging.basicConfig`). The bridge's own `OpencodeServe.start()`
+        # probe-healthy short-circuits (`_reused=True`, `stop()` no-op) so it
+        # reuses the already-running opencode serve — no second subprocess, no
+        # port conflict. Lifecycle is tied to `close()` which cancels + drains
+        # the task so the bridge's `finally` (saving seen-set, closing clients,
+        # no-op'ing its reused serve.stop()) runs BEFORE the bot kills the real
+        # opencode serve subprocess. A bridge crash is isolated by the
+        # `_bridge_guard` wrapper — it logs and dies without taking the bot
+        # down. The `self._bridge_task is None` guard prevents a reconnect
+        # re-spawn (mirrors `_serve_started`).
+        if (
+            config.comulytic_enabled
+            and config.comulytic_jwt
+            and self._bridge_task is None
+        ):
+            from opencode_discord_bot.bridge import run_bridge
+
+            async def _bridge_guard() -> None:
+                try:
+                    await run_bridge()
+                except asyncio.CancelledError:
+                    raise  # close() cancels cleanly — let finally in run_bridge run
+                except Exception:  # noqa: BLE001 — bridge crash must not kill the bot
+                    _log.exception("comulytic bridge task crashed")
+
+            self._bridge_task = asyncio.create_task(_bridge_guard())
+            _log.info("comulytic bridge auto-started (in-process task)")
+
     async def close(self) -> None:
         """Stop voice sessions + the opencode serve subprocess, then close the gateway.
 
@@ -513,6 +483,20 @@ class OpencodeBot(discord.Bot):
             except Exception:  # noqa: BLE001 — teardown must not raise
                 _log.warning("voice disconnect raised during close", exc_info=True)
         self._voice_sessions.clear()
+        # Cancel + drain the comulytic bridge task FIRST so its `run_bridge()`
+        # `finally` block runs (saves the seen-set, closes its httpx clients,
+        # and no-ops its reused `serve.stop()`) BEFORE we kill the real opencode
+        # serve subprocess below. A 10s drain ceiling so a stuck poll cycle
+        # can't hang shutdown; on timeout we give up and the task is abandoned
+        # (the process is exiting anyway, so orphaned clients are reaped by the
+        # OS). `CancelledError` is expected and swallowed.
+        if self._bridge_task is not None:
+            self._bridge_task.cancel()
+            try:
+                await asyncio.wait_for(self._bridge_task, timeout=10.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                pass
+            self._bridge_task = None
         try:
             # `stop()` does blocking subprocess.run + proc.wait (up to ~8s on
             # Windows tree-kill). Offload it so the event loop keeps draining
@@ -1729,26 +1713,3 @@ def _status_to_progress_text(status: SessionStatus) -> str:
             base = "retrying"
         return f"{base}: {message}" if message else base
     return ""
-
-
-def _final_assistant_text(messages: list[dict]) -> str:
-    """Extract the text of the last assistant message from list_messages output.
-
-    `list_messages` returns ``[{"info": Message, "parts": [Part]}, ...]``. We
-    want the last message whose `info.role == "assistant"` and whose parts
-    contain text. Falls back to the last message with any text.
-    """
-    last_assistant: str | None = None
-    last_any: str | None = None
-    for entry in messages:
-        if not isinstance(entry, dict):
-            continue
-        info = entry.get("info") or {}
-        parts = entry.get("parts") or []
-        text = _extract_text(parts)
-        if not text:
-            continue
-        last_any = text
-        if info.get("role") == "assistant":
-            last_assistant = text
-    return last_assistant if last_assistant is not None else (last_any or "")

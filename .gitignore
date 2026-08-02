@@ -2,6 +2,8 @@ __pycache__/
 *.pyc
 *.pyo
 .opencode-discord-bot-sessions.json
+.opencode-discord-bridge-sessions.json
+.comulytic-seen.json
 .venv/
 *.egg-info/
 build/

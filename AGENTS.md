@@ -130,6 +130,53 @@ control bot.
   request as Discord buttons / select menus, and POSTs the user's choice back
   to the matching REST endpoint so the deferred resolves and the agent turn
   resumes.
+- **Comulytic bridge → Discord channel** (`bridge.py:route_to_plan_author` +
+  `discord_rest.py` + `bridge_questions.py` + `text_utils.py`): when
+  `discord_bot_token` + `discord_bot_guild_id` are set, the bridge creates a
+  Discord text channel for each routed Comulytic recording (mirrors
+  `/oc_talk`), posts the transcript, fires an LLM slug rename, sends to
+  `plan-author`, surfaces clarifying questions as plain-text prompts (polling
+  `GET /channels/{id}/messages` for the user's reply via the REST-based
+  `poll_pending_requests_rest`), and posts the final response. Uses **raw
+  Discord REST via `DiscordRest`** (no Pycord, no gateway — safe to run
+  alongside the main bot, which owns the gateway session). Binds channels in
+  a **separate** persistence file `.opencode-discord-bridge-sessions.json`
+  (NOT `.opencode-discord-bot-sessions.json`) so the bridge's channel bindings
+  don't clobber the main bot's. `text_utils.py` is the Pycord-free shared module for
+  `_split_message`/`_extract_text`/`_final_assistant_text`/`_slugify_prompt`
+  (imported by both `commands.py` and `bridge.py`). When Discord isn't
+  configured, `route_to_plan_author` falls back to log-only.
+- **Comulytic bridge auto-spawn:** `OpencodeBot.on_connect` spawns the bridge
+  as an in-process `asyncio.create_task` (calling `run_bridge()` directly, NOT
+  `main()` — `main()` would create a second event loop + reconfigure root
+  logging) when `config.comulytic_enabled` AND `config.comulytic_jwt` are both
+  set. The bridge's own `OpencodeServe.start()` probe-healthy short-circuits
+  (`_reused=True`, `stop()` no-op) so it reuses the bot's already-running
+  `opencode serve` — no second subprocess, no port conflict. `OpencodeBot.close`
+  cancels + drains the task (10s ceiling) so the bridge's `finally` (save
+  seen-set, close clients, no-op reused serve) runs BEFORE the bot kills the
+  real serve subprocess. A bridge crash is isolated by a `_bridge_guard`
+  wrapper and cannot take the bot down. The `self._bridge_task is None` guard
+  prevents a reconnect re-spawn. So: starting the bot (`python -m
+  opencode_discord_bot`) with `COMULYTIC_ENABLED=true` + `COMULYTIC_JWT` set is
+  now sufficient — no separate `comulytic-bridge` launch needed (the console
+  script remains as a standalone manual override). Without those two env vars,
+  no bridge task is created (silent no-op).
+- **Comulytic bridge transcription is local-Whisper-only:** the bridge NEVER
+  consults Comulytic's cloud ASR (`queryTranscribeResult` / `asrResultVO`).
+  For every audio-delivered recording it downloads the audio (`download_audio_smart`,
+  Path B proxy primary + Path A pre-signed fallback) and runs the SAME
+  transcription pipeline `/oc_talk` uses — `voice.extract_audio_to_wav` (ffmpeg
+  → mono 16kHz WAV) + `voice.transcribe_audio` (dispatches on
+  `voice_stt_provider`: default `"local"` = in-process faster-whisper
+  CTranslate2; `"openai"` = cloud Whisper API; `"auto"` = local first, cloud
+  fallback). By default transcription is fully local and private, consistent
+  with `/oc_talk`. `voice.py` imports Pycord at module top, so the bridge
+  (in-process with the bot) has Pycord loaded once it processes its first
+  recording — Pycord is a hard dep, so the standalone `comulytic-bridge`
+  script is unaffected. The old `comulytic_audio_fallback` config flag (cloud
+  ASR primary, local Whisper fallback) is GONE — local Whisper is the sole
+  path, so there's nothing to fall back from.
 
 ## Conventions
 
@@ -187,7 +234,13 @@ control bot.
   `VOICE_TTS_ENABLED` / `VOICE_TTS_MODEL` / `VOICE_TTS_VOICE` /
   `VOICE_TTS_SPEED` / `WHISPER_MODEL` / `WHISPER_DEVICE` / `WHISPER_COMPUTE_TYPE`
   / `OPENAI_API_KEY` / `OLLAMA_API_URL` / `OLLAMA_AUTH_KEY` / `SLUG_MODEL` /
-  `SLUG_TIMEOUT_SECONDS`.
+  `SLUG_TIMEOUT_SECONDS` / `COMULYTIC_ENABLED` / `COMULYTIC_JWT` /
+  `COMULYTIC_REFRESH_TOKEN` / `COMULYTIC_API_BASE` / `COMULYTIC_WEB_BASE` /
+  `COMULYTIC_AUDIO_PATH` / `COMULYTIC_POLL_INTERVAL_SECONDS` /
+  `COMULYTIC_POLL_PAGE_SIZE` / `COMULYTIC_USER_AGENT` / `COMULYTIC_PLAN_TYPE` /
+  `COMULYTIC_RELOGIN_WARN_DAYS` / `COMULYTIC_STATE_FILE` /
+  `COMULYTIC_DISCORD_POINTER_CHANNEL_ID` / `COMULYTIC_QUESTION_TIMEOUT_SECONDS` /
+  `COMULYTIC_QUESTION_POLL_INTERVAL_SECONDS`.
 - Get the keys at: Discord bot token at
   https://discord.com/developers/applications (Bot tab), OpenAI key at
   https://platform.openai.com/api-keys, Ollama Cloud key at
