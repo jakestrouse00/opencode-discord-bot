@@ -78,6 +78,14 @@ PROGRESS_EDIT_MIN_INTERVAL = 2.0
 _STALE_DEFAULT_TRIGGER_CHANNEL_ID = 1533242090862149842
 
 
+def _log_preview(text: str, max_len: int = 80) -> str:
+    """Collapse whitespace and truncate ``text`` for safe one-line log output."""
+    flat = " ".join(text.split())
+    if len(flat) <= max_len:
+        return flat
+    return flat[: max_len - 1] + "…"
+
+
 def _channel_allowed(channel_id: int) -> bool:
     allow = config.discord_bot_allowed_channel_ids
     if not allow:
@@ -180,6 +188,10 @@ class OpencodeBot(discord.Bot):
             ctx: discord.ApplicationContext,
             prompt: str = discord.Option(str, "The prompt to send to opencode."),
         ) -> None:
+            _log.info(
+                "/oc received (user=%s, channel=%s, guild=%s): %s",
+                ctx.author, ctx.channel_id, ctx.guild_id, _log_preview(prompt)
+            )
             await self._run_prompt(ctx, prompt, agent=None)
 
         @self.slash_command(
@@ -207,6 +219,14 @@ class OpencodeBot(discord.Bot):
                     else "[PLAN_TYPE_PRESELECTED: note]"
                 )
                 prompt = f"{directive}\n\n{change}"
+            _log.info(
+                "/oc_plan received (user=%s, channel=%s, guild=%s, plan_type=%s): %s",
+                ctx.author,
+                ctx.channel_id,
+                ctx.guild_id,
+                plan_type or "(auto-classify)",
+                _log_preview(change),
+            )
             await self._run_prompt(ctx, prompt, agent="plan-author", echo_prompt=change)
 
         @self.slash_command(
@@ -214,6 +234,9 @@ class OpencodeBot(discord.Bot):
             description="Reset this channel's opencode session (start fresh).",
         )
         async def oc_new(ctx: discord.ApplicationContext) -> None:
+            _log.info(
+                "/oc_new received (user=%s, channel=%s)", ctx.author, ctx.channel_id
+            )
             if not self._channel_ok(ctx.channel_id):
                 await _deny(ctx)
                 return
@@ -229,6 +252,9 @@ class OpencodeBot(discord.Bot):
             description="Show this channel's current opencode session + status.",
         )
         async def oc_session(ctx: discord.ApplicationContext) -> None:
+            _log.info(
+                "/oc_session received (user=%s, channel=%s)", ctx.author, ctx.channel_id
+            )
             if not self._channel_ok(ctx.channel_id):
                 await _deny(ctx)
                 return
@@ -250,6 +276,7 @@ class OpencodeBot(discord.Bot):
                 if isinstance(session.get("status"), dict)
                 else str(session.get("status", "unknown"))
             )
+            _log.info("/oc_session -> session=%s title=%r status=%s", sid, title, status)
             await ctx.followup.send(
                 f"Session `{sid}`\nTitle: {title}\nStatus: {status}"
             )
@@ -258,6 +285,11 @@ class OpencodeBot(discord.Bot):
             name="oc_sessions", description="List recent opencode sessions."
         )
         async def oc_sessions(ctx: discord.ApplicationContext) -> None:
+            _log.info(
+                "/oc_sessions received (user=%s, channel=%s)",
+                ctx.author,
+                ctx.channel_id,
+            )
             if not self._channel_ok(ctx.channel_id):
                 await _deny(ctx)
                 return
@@ -268,6 +300,7 @@ class OpencodeBot(discord.Bot):
                 await ctx.followup.send(f"Failed to list sessions: {e}")
                 return
             recent = sessions[:10]
+            _log.info("/oc_sessions -> %d total, %d recent", len(sessions), len(recent))
             lines = [
                 f"`{s.get('id', '?')}` — {s.get('title', '(no title)')}" for s in recent
             ]
@@ -282,6 +315,9 @@ class OpencodeBot(discord.Bot):
             description="Abort the running opencode session bound to this channel.",
         )
         async def oc_abort(ctx: discord.ApplicationContext) -> None:
+            _log.info(
+                "/oc_abort received (user=%s, channel=%s)", ctx.author, ctx.channel_id
+            )
             if not self._channel_ok(ctx.channel_id):
                 await _deny(ctx)
                 return
@@ -290,11 +326,13 @@ class OpencodeBot(discord.Bot):
             if sid is None:
                 await ctx.followup.send("No opencode session bound to this channel.")
                 return
+            _log.info("/oc_abort -> aborting session=%s", sid)
             try:
                 ok = await self.client.abort_session(sid)
             except OpencodeError as e:
                 await ctx.followup.send(f"Failed to abort session `{sid}`: {e}")
                 return
+            _log.info("/oc_abort -> session=%s result=%s", sid, ok)
             await ctx.followup.send(f"Abort requested for session `{sid}`: {ok}.")
 
         @self.slash_command(
@@ -319,6 +357,13 @@ class OpencodeBot(discord.Bot):
                 required=False,
             ),
         ) -> None:
+            _log.info(
+                "/oc_voice received (user=%s, channel=%s, guild=%s, mode=%s)",
+                ctx.author,
+                ctx.channel_id,
+                ctx.guild_id,
+                mode,
+            )
             await self._start_voice_session(ctx, mode, voice_channel)
 
         @self.slash_command(
@@ -326,12 +371,22 @@ class OpencodeBot(discord.Bot):
             description="Manually stop the active voice session and process the transcript.",
         )
         async def oc_voice_stop(ctx: discord.ApplicationContext) -> None:
+            _log.info(
+                "/oc_voice_stop received (user=%s, guild=%s)",
+                ctx.author,
+                ctx.guild_id,
+            )
             session = self._voice_sessions.get(ctx.guild_id)
             if session is None:
                 await ctx.respond("No active voice session in this guild.")
                 return
             await ctx.defer()
             transcript = await session.stop()
+            _log.info(
+                "/oc_voice_stop -> voice session stopped (guild=%s, transcript_len=%d)",
+                ctx.guild_id,
+                len(transcript or ""),
+            )
             await self._finalize_voice_session(ctx, session, transcript)
 
         @self.slash_command(
@@ -356,6 +411,16 @@ class OpencodeBot(discord.Bot):
                 required=False,
             ),
         ) -> None:
+            _log.info(
+                "/oc_talk received (user=%s, channel=%s, guild=%s, file=%s, "
+                "size=%dB, plan_type=%s)",
+                ctx.author,
+                ctx.channel_id,
+                ctx.guild_id,
+                recording.filename,
+                recording.size,
+                plan_type or "(auto-classify)",
+            )
             await self._run_talk_session(ctx, recording, plan_type)
 
         @self.slash_command(
@@ -363,6 +428,12 @@ class OpencodeBot(discord.Bot):
             description="Delete all bot-created session channels in the session category.",
         )
         async def oc_cleanup(ctx: discord.ApplicationContext) -> None:
+            _log.info(
+                "/oc_cleanup received (user=%s, channel=%s, guild=%s)",
+                ctx.author,
+                ctx.channel_id,
+                ctx.guild_id,
+            )
             # Defer (ephemeral) because deleting many channels can take a few
             # seconds and we need to keep the interaction alive. Ephemeral so
             # the summary is only visible to the caller, not the whole guild.
@@ -445,6 +516,12 @@ class OpencodeBot(discord.Bot):
             summary = f"Deleted {deleted}/{len(targets)} session channels."
             if failed:
                 summary += "\nFailed:\n" + "\n".join(failed)
+            _log.info(
+                "/oc_cleanup -> deleted=%d/%d, failed=%d",
+                deleted,
+                len(targets),
+                len(failed),
+            )
             await ctx.followup.send(summary)
 
         @self.slash_command(
@@ -452,12 +529,21 @@ class OpencodeBot(discord.Bot):
             description="One-time setup: create the sessions category + bot channels and persist their IDs to .env.",
         )
         async def oc_setup(ctx: discord.ApplicationContext) -> None:
+            _log.info(
+                "/oc_setup received (user=%s, channel=%s, guild=%s)",
+                ctx.author,
+                ctx.channel_id,
+                ctx.guild_id,
+            )
             await self._run_setup(ctx)
 
         @self.slash_command(
             name="oc_help", description="List the opencode bot commands."
         )
         async def oc_help(ctx: discord.ApplicationContext) -> None:
+            _log.info(
+                "/oc_help received (user=%s, channel=%s)", ctx.author, ctx.channel_id
+            )
             text = (
                 "**opencode bot commands**\n"
                 "/oc `<prompt>` — create a new session channel and send the prompt.\n"
@@ -639,15 +725,14 @@ class OpencodeBot(discord.Bot):
         return _channel_allowed(channel_id)
 
     def _is_guild_configured(self) -> bool:
-        """True if ANY guild-specific Discord setting is already configured.
+        """True if ANY of `/oc_setup`'s *output* settings is already configured.
 
         `/oc_setup` is a one-time setup command — it refuses to run if any of
-        the four guild-specific fields already has a non-default value, to
-        avoid silently overwriting a working setup (or creating a duplicate
-        "OpenCode Sessions" category). The "unset" sentinels:
+        the three guild-specific fields it *creates* already has a non-default
+        value, to avoid silently overwriting a working setup (or creating a
+        duplicate "OpenCode Sessions" category). The "unset" sentinels:
 
           - `discord_bot_session_category_id == 0` (config default)
-          - `discord_bot_guild_id == 0` (config default)
           - `discord_bot_allowed_channel_ids` empty (config default)
           - `voice_message_trigger_channel_id` is 0 OR the stale baked-in
             default (`_STALE_DEFAULT_TRIGGER_CHANNEL_ID`) — the latter ships
@@ -658,10 +743,18 @@ class OpencodeBot(discord.Bot):
         set up" for this guild and `/oc_setup` refuses. The user must clear
         the fields in `.env` manually to re-run setup (intentionally
         destructive, so not exposed as a command toggle).
+
+        `discord_bot_guild_id` is deliberately NOT part of this gate: it's an
+        *input* to setup (read by `sync_commands.py` as the default sync
+        target, and written-through by `/oc_setup` only if previously 0),
+        not an output. `SETUP_GUIDE.md` tells users to set it in `.env`
+        before running `/oc_setup`, and `sync_commands.py` needs it (or
+        `--guild`) to push the `/oc_setup` command into the guild in the
+        first place — gating on it would make the documented setup flow
+        unrunnable (the bot would refuse with an ephemeral "already set up"
+        message the instant the user follows the guide).
         """
         if config.discord_bot_session_category_id != 0:
-            return True
-        if config.discord_bot_guild_id != 0:
             return True
         if config.discord_bot_allowed_channel_ids:
             return True
@@ -690,7 +783,7 @@ class OpencodeBot(discord.Bot):
            - `bot-commands` — repurposed as `DISCORD_BOT_ALLOWED_CHANNEL_IDS`
              (a one-element JSON list so slash commands are restricted to
              this channel + bot-created session channels).
-        5. Writes the four IDs to `.env` (cwd-relative, matching
+        5. Writes the three created IDs to `.env` (cwd-relative, matching
            `BotConfig.model_config`'s `env_file=".env"`) via `env_writer`,
            so they persist across restarts. Also writes `DISCORD_BOT_GUILD_ID`
            from `ctx.guild.id` if it was previously unset.
@@ -717,8 +810,6 @@ class OpencodeBot(discord.Bot):
                 "manually first:\n"
                 "- `DISCORD_BOT_SESSION_CATEGORY_ID` "
                 f"(currently `{config.discord_bot_session_category_id}`)\n"
-                "- `DISCORD_BOT_GUILD_ID` "
-                f"(currently `{config.discord_bot_guild_id}`)\n"
                 "- `DISCORD_BOT_ALLOWED_CHANNEL_IDS` "
                 f"(currently `{config.discord_bot_allowed_channel_ids}`)\n"
                 "- `VOICE_MESSAGE_TRIGGER_CHANNEL_ID` "
@@ -960,6 +1051,7 @@ class OpencodeBot(discord.Bot):
         message list (the fetch inside this method already did that work).
         """
         self._active_drives[sid] = asyncio.current_task()  # type: ignore[assignment]
+        _log.info("driving session %s: polling status until idle", sid)
         # The request poller surfaces pending question/permission requests
         # for this session as Discord buttons/selects (or via voice when
         # `voice_session` is set). Runs concurrently with `poll_until_idle` and
@@ -986,6 +1078,7 @@ class OpencodeBot(discord.Bot):
                 if not text or text == last_status_text:
                     return
                 last_status_text = text
+                _log.info("session %s status: %s", sid, text)
                 now = time.monotonic()
                 if now - last_edit < PROGRESS_EDIT_MIN_INTERVAL:
                     return
@@ -1011,19 +1104,30 @@ class OpencodeBot(discord.Bot):
                     sid,
                 )
             except asyncio.CancelledError:
-                pass
+                _log.info("session %s drive cancelled (abort or shutdown)", sid)
+            else:
+                _log.info("session %s went idle; fetching final messages", sid)
 
             try:
                 messages = await self.client.list_messages(sid)
             except OpencodeError as e:
+                _log.warning("session %s list_messages failed: %r", sid, e)
                 await send_chunk(f"Failed to fetch final messages: {e}")
                 return None
             final_text = _final_assistant_text(messages)
             if not final_text:
+                _log.info("session %s produced no text output", sid)
                 await send_chunk(f"Done (no text output). Session `{sid}` is now idle.")
                 return None
             prefix = f"**opencode** (session `{sid}`):\n"
-            for chunk in _split_message(prefix + final_text):
+            chunks = list(_split_message(prefix + final_text))
+            _log.info(
+                "session %s final reply: %d chars in %d chunk(s)",
+                sid,
+                len(final_text),
+                len(chunks),
+            )
+            for chunk in chunks:
                 await send_chunk(chunk)
             return final_text
         finally:
@@ -1033,6 +1137,7 @@ class OpencodeBot(discord.Bot):
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 poller.cancel()
             self._active_drives.pop(sid, None)
+            _log.info("session %s drive finished", sid)
 
     async def _run_prompt(
         self,
@@ -1067,11 +1172,18 @@ class OpencodeBot(discord.Bot):
         try:
             session = await self.client.create_session(title="discord-pending")
         except OpencodeError as e:
+            _log.warning("create_session failed: %r", e)
             await ctx.followup.send(f"Failed to create opencode session: {e}")
             return
         sid = session["id"]
         short_sid = sid[:8] if sid else "unknown"
         slug = _slugify_prompt(prompt, fallback=f"oc-{short_sid}")
+        _log.info(
+            "created opencode session %s (agent=%s, prompt=%s)",
+            sid,
+            agent or "(default)",
+            _log_preview(echo_prompt or prompt),
+        )
 
         # Resolve the target category (best-effort; create with no parent if
         # unset or not found).
@@ -1103,8 +1215,15 @@ class OpencodeBot(discord.Bot):
                 reason=f"/oc slash command by {ctx.user}",
             )
         except discord.HTTPException as e:
+            _log.warning("create_text_channel failed for session %s: %r", sid, e)
             await ctx.followup.send(f"Failed to create session channel `{slug}`: {e}")
             return
+        _log.info(
+            "created session channel #%s (id=%s) for session %s",
+            new_channel.name,
+            new_channel.id,
+            sid,
+        )
 
         # Best-effort LLM slug upgrade: the channel was created immediately
         # with the regex `slug` (so the user gets the pointer fast); this
@@ -1129,11 +1248,13 @@ class OpencodeBot(discord.Bot):
         try:
             await self.client.send_prompt_async(sid, parts, agent=agent)
         except OpencodeError as e:
+            _log.warning("send_prompt_async failed for session %s: %r", sid, e)
             await ctx.followup.send(
                 f"Created {new_channel.mention} but failed to send prompt to session `{sid}`: {e}"
             )
             await new_channel.send(f"Failed to send initial prompt: {e}")
             return
+        _log.info("prompt sent to session %s (agent=%s)", sid, agent or "(default)")
 
         # Echo the user's original request text in the new channel (opt-in;
         # only /oc_plan passes echo_prompt) so they can see/copy what they
@@ -1192,10 +1313,22 @@ class OpencodeBot(discord.Bot):
         # (a) Voice follow-up in an existing session channel.
         if sid is not None and voice_att is not None:
             if sid in self._active_drives:
+                _log.info(
+                    "follow-up rejected (session %s busy): voice message in #%s",
+                    sid,
+                    message.channel.name,
+                )
                 await message.channel.send(
                     "Session is busy, please wait for the current response to finish."
                 )
                 return
+            _log.info(
+                "follow-up voice message in #%s -> session %s (file=%s, size=%dB)",
+                message.channel.name,
+                sid,
+                voice_att.filename,
+                voice_att.size,
+            )
             await self._run_voice_followup(message, sid, voice_att)
             return
         # (b) Text follow-up in an existing session channel (existing path).
@@ -1203,10 +1336,21 @@ class OpencodeBot(discord.Bot):
             if not message.content:
                 return
             if sid in self._active_drives:
+                _log.info(
+                    "follow-up rejected (session %s busy): text in #%s",
+                    sid,
+                    message.channel.name,
+                )
                 await message.channel.send(
                     "Session is busy, please wait for the current response to finish."
                 )
                 return
+            _log.info(
+                "follow-up text in #%s -> session %s: %s",
+                message.channel.name,
+                sid,
+                _log_preview(message.content),
+            )
             await self._run_followup(message, sid)
             return
         # (c) Voice message in the configured trigger channel -> new session.
@@ -1216,6 +1360,13 @@ class OpencodeBot(discord.Bot):
             and config.voice_message_trigger_channel_id
             and message.channel.id == config.voice_message_trigger_channel_id
         ):
+            _log.info(
+                "voice message in trigger channel #%s -> new plan-author session "
+                "(file=%s, size=%dB)",
+                message.channel.name,
+                voice_att.filename,
+                voice_att.size,
+            )
             await self._run_talk_from_message(message, voice_att)
             return
         # (d) Non-session, non-voice (or trigger channel not configured) — ignored.
@@ -1281,10 +1432,12 @@ class OpencodeBot(discord.Bot):
         try:
             await self.client.send_prompt_async(sid, parts)
         except OpencodeError as e:
+            _log.warning("follow-up send_prompt_async failed for session %s: %r", sid, e)
             await message.channel.send(
                 f"Failed to send follow-up to session `{sid}`: {e}"
             )
             return
+        _log.info("follow-up prompt sent to session %s", sid)
 
         # Best-effort: map this Discord follow-up message to the opencode
         # user message it just created, so a later edit can revert to it.
@@ -1349,6 +1502,10 @@ class OpencodeBot(discord.Bot):
 
         transcript = (transcript or "").strip()
         if not transcript:
+            _log.info(
+                "voice follow-up transcript empty for session %s (no speech detected)",
+                sid,
+            )
             await status_msg.edit(
                 content="Transcription came back empty (no speech detected). "
                 "The session is bound to this channel — type your plan as "
@@ -1356,15 +1513,24 @@ class OpencodeBot(discord.Bot):
             )
             return
 
+        _log.info(
+            "voice follow-up transcribed for session %s: %s",
+            sid,
+            _log_preview(transcript),
+        )
         # Send the transcript to the session's existing agent (no override).
         parts = [{"type": "text", "text": transcript}]
         try:
             await self.client.send_prompt_async(sid, parts)
         except OpencodeError as e:
+            _log.warning(
+                "voice follow-up send_prompt_async failed for session %s: %r", sid, e
+            )
             await message.channel.send(
                 f"Failed to send voice follow-up to session `{sid}`: {e}"
             )
             return
+        _log.info("voice follow-up prompt sent to session %s", sid)
 
         # Best-effort: map this Discord voice message to the opencode user
         # message it just created, so a later edit can revert to it. Mirrors
@@ -1437,6 +1603,13 @@ class OpencodeBot(discord.Bot):
         if opencode_msg_id is None:
             return
         # (d) Abort + cancel the running drive task if busy.
+        _log.info(
+            "edit-and-resend on #%s -> session %s (old=%s, new: %s)",
+            after.channel.name,
+            sid,
+            opencode_msg_id,
+            _log_preview(after.content),
+        )
         try:
             if sid in self._active_drives:
                 task = self._active_drives.pop(sid, None)
@@ -1455,6 +1628,7 @@ class OpencodeBot(discord.Bot):
             # (step 8) A failed revert leaves the session in an inconsistent
             # state; surface the error and do NOT update the mapping so the
             # user knows their edit didn't take effect.
+            _log.warning("edit-and-resend revert failed for session %s: %r", sid, e)
             try:
                 await after.channel.send(
                     f"Edit-and-resend failed: {e}. The session may need to be "
@@ -1468,6 +1642,11 @@ class OpencodeBot(discord.Bot):
         try:
             await self.client.send_prompt_async(sid, parts)
         except OpencodeError as e:
+            _log.warning(
+                "edit-and-resend send failed for session %s (revert succeeded): %r",
+                sid,
+                e,
+            )
             try:
                 await after.channel.send(
                     f"Edit-and-resend: revert succeeded but sending the new "
@@ -1476,6 +1655,7 @@ class OpencodeBot(discord.Bot):
             except discord.HTTPException:
                 _log.warning("failed to post edit-and-resend send error", exc_info=True)
             return
+        _log.info("edit-and-resend prompt sent to session %s", sid)
         # (g) Re-map the same Discord message id at the new opencode user
         # message id so repeated edits keep working.
         new_user_id = await self._fetch_last_user_message_id(
