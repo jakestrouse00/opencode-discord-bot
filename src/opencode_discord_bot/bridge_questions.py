@@ -221,6 +221,7 @@ async def _await_reply(
     unknown (None), we skip messages whose author.bot is True instead.
     """
     deadline = asyncio.get_event_loop().time() + timeout
+    seen_total = 0  # debug counter for the timeout diagnostic
     while asyncio.get_event_loop().time() < deadline:
         try:
             msgs = await rest.list_messages(channel_id, after=after_msg_id, limit=50)
@@ -228,6 +229,7 @@ async def _await_reply(
             _log.warning("list_messages on %s failed: %s", channel_id, exc)
             await asyncio.sleep(_REPLY_POLL_INTERVAL)
             continue
+        seen_total += len(msgs)
         # list_messages returns newest-first; iterate oldest-first so the
         # earliest non-bot reply wins.
         for m in reversed(msgs):
@@ -242,6 +244,22 @@ async def _await_reply(
             if content.strip():
                 return content
         await asyncio.sleep(_REPLY_POLL_INTERVAL)
+    # Diagnostic: if we timed out without finding a reply, log how many
+    # messages we saw total across polls and which filter (bot_user_id vs
+    # author.bot) was active. A persistently low seen_total with no reply
+    # suggests the Message Content privileged intent is off (Discord
+    # returns empty `content` for user messages without it); a high
+    # seen_total with no reply suggests all messages were filtered as
+    # bot-authored (bot_user_id mismatch or a misidentified bot flag).
+    _log.warning(
+        "_await_reply timed out on channel %s after %.0fs (after_msg=%s, "
+        "bot_user_id=%s, saw %d messages total, none matched as a user reply)",
+        channel_id,
+        timeout,
+        after_msg_id,
+        bot_user_id,
+        seen_total,
+    )
     return None
 
 
