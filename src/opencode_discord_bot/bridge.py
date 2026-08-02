@@ -932,6 +932,13 @@ async def route_to_plan_author(
 
     # Build the prompt with the optional plan-type directive (sent regardless
     # of whether Discord is active).
+    # The [COMULYTIC_BRIDGE] directive is ALWAYS prepended so plan-author
+    # knows this session is on the plain-text-reply path (buttons cannot be
+    # used — the bridge doesn't own the gateway connection and so can't
+    # receive component-interaction events). plan-author constrains its
+    # clarifying-question behavior accordingly (one question per call, not
+    # the 1-3 batch allowed on the button path). See .opencode/agent/plan-author.md
+    # "Comulytic bridge (plain-text replies, no buttons)".
     prompt = transcript
     plan_type = (
         config.comulytic_plan_type.strip().lower() if config.comulytic_plan_type else ""
@@ -942,7 +949,9 @@ async def route_to_plan_author(
             if plan_type == "actionable"
             else "[PLAN_TYPE_PRESELECTED: note]"
         )
-        prompt = f"{directive}\n\n{transcript}"
+        prompt = f"[COMULYTIC_BRIDGE]\n{directive}\n\n{transcript}"
+    else:
+        prompt = f"[COMULYTIC_BRIDGE]\n\n{transcript}"
 
     # --- Create the Discord channel + post the transcript BEFORE the prompt ---
     progress_msg_id: int | None = None
