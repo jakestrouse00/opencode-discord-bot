@@ -78,6 +78,14 @@ PROGRESS_EDIT_MIN_INTERVAL = 2.0
 # baked-in default count as "unset" — a fresh guild has neither.
 _STALE_DEFAULT_TRIGGER_CHANNEL_ID = 1533242090862149842
 
+# Persistence file for the Comulytic bridge's SessionRouter (channel id ->
+# opencode session id). MUST match `bridge.py:_BRIDGE_SESSIONS_FILE` — the
+# bridge owns writes to this file; the main bot only READS it (and `reset`s
+# entries on `/oc_new` / `/oc_cleanup`). Kept as a string constant here
+# rather than imported from `bridge.py` to avoid pulling the bridge's full
+# import surface (comulytic client, etc.) into the main bot's module top.
+_BRIDGE_SESSIONS_FILE = ".opencode-discord-bridge-sessions.json"
+
 
 def _log_preview(text: str, max_len: int = 80) -> str:
     """Collapse whitespace and truncate ``text`` for safe one-line log output."""
@@ -189,6 +197,15 @@ class OpencodeBot(discord.Bot):
         # disabled or not yet started; guards against a reconnect re-spawn
         # (mirrors `_serve_started`).
         self._bridge_task: asyncio.Task | None = None
+        # Lazy handle for the Comulytic bridge's SessionRouter (separate
+        # persistence file `.opencode-discord-bridge-sessions.json` — see
+        # `_BRIDGE_SESSIONS_FILE` above). Constructed on first
+        # `_bridged_sid` call so deployments without the bridge never touch
+        # the file. The bridge OWNS writes to this file (via its own
+        # `SessionRouter` in `bridge.py:run_bridge`); the main bot only
+        # reads it (and `reset`s entries on `/oc_new` / `/oc_cleanup`) so
+        # the two processes don't clobber each other's writes.
+        self.bridge_router: SessionRouter | None = None
         self._register_commands()
 
     def _register_commands(self) -> None:
@@ -274,7 +291,15 @@ class OpencodeBot(discord.Bot):
             if not self._channel_ok(ctx.channel_id):
                 await _deny(ctx)
                 return
+            # Reset whichever router holds the binding. `reset` is a no-op
+            # when the channel isn't bound, so resetting both is safe and
+            # avoids branching on which router owns the channel — covers
+            # both `/oc` / `/oc_plan` channels (main router) and
+            # Comulytic-bridge channels (bridge router) so plain-text
+            # follow-ups stop being forwarded in either case.
             await self.router.reset(ctx.channel_id)
+            if self.bridge_router is not None:
+                await self.bridge_router.reset(ctx.channel_id)
             await ctx.respond(
                 f"Session binding reset for channel {ctx.channel_id}. "
                 "Plain-text messages here will no longer be forwarded. "
@@ -294,7 +319,7 @@ class OpencodeBot(discord.Bot):
                 await _deny(ctx)
                 return
             await ctx.defer()
-            sid = self.router.current(ctx.channel_id)
+            sid = self._resolve_sid(ctx.channel_id)
             if sid is None:
                 await ctx.followup.send(
                     "No opencode session bound to this channel. Use `/oc` to create one."
@@ -362,7 +387,7 @@ class OpencodeBot(discord.Bot):
                 await _deny(ctx)
                 return
             await ctx.defer()
-            sid = self.router.current(ctx.channel_id)
+            sid = self._resolve_sid(ctx.channel_id)
             if sid is None:
                 await ctx.followup.send("No opencode session bound to this channel.")
                 return
@@ -537,9 +562,14 @@ class OpencodeBot(discord.Bot):
             # follow-up has a live session and try to route into a deleted
             # channel). `reset` drops the binding and persists — it's the
             # existing `unbind` equivalent, so no new SessionRouter method is
-            # needed. Wrapped per-channel so one router failure doesn't lose the
-            # deletion summary; the router-clearing as a whole is best-effort
-            # and never blocks the channel deletion itself.
+            # needed. Both routers are cleared per channel: the main bot's
+            # (`self.router`) for `/oc` / `/oc_plan` channels and the
+            # Comulytic bridge's (`self.bridge_router`, if constructed) for
+            # bridge-created channels, since `/oc_cleanup` deletes every
+            # text channel under the session category regardless of which
+            # router bound it. Wrapped per-channel so one router failure
+            # doesn't lose the deletion summary; the router-clearing as a
+            # whole is best-effort and never blocks the channel deletion.
             for ch in targets:
                 try:
                     await ch.delete(reason=f"/oc_cleanup by {ctx.author}")
@@ -549,6 +579,8 @@ class OpencodeBot(discord.Bot):
                 try:
                     if self.router.current(ch.id) is not None:
                         await self.router.reset(ch.id)
+                    if self.bridge_router is not None and self.bridge_router.current(ch.id) is not None:
+                        await self.bridge_router.reset(ch.id)
                 except (
                     Exception
                 ):  # noqa: BLE001 — router cleanup must not lose the summary
@@ -811,9 +843,46 @@ class OpencodeBot(discord.Bot):
         """
         if channel_id is None:
             return False
-        if self.router.current(channel_id) is not None:
+        if self._resolve_sid(channel_id) is not None:
             return True
         return _channel_allowed(channel_id)
+
+    def _bridged_sid(self, channel_id: int) -> str | None:
+        """Return the opencode session id bound to `channel_id` in the
+        Comulytic bridge's SessionRouter, or None.
+
+        The bridge creates Discord channels for routed recordings and binds
+        them in a SEPARATE persistence file
+        (`.opencode-discord-bridge-sessions.json` — see `_BRIDGE_SESSIONS_FILE`)
+        so its writes don't clobber the main bot's. Without consulting that
+        file, the main bot's `on_message` / slash commands would be blind to
+        bridge-created channels and a user returning to one hours later
+        couldn't resume the session (their plain-text follow-ups would
+        silently hit the "not a session channel" branch and be ignored).
+
+        The bridge router is constructed lazily on first call so
+        deployments without the bridge never open the file.
+        `SessionRouter.__init__` swallows `OSError`/JSON errors and falls
+        back to an empty map, so a missing/corrupt file degrades to "no
+        bridge bindings" rather than crashing.
+        """
+        if self.bridge_router is None:
+            self.bridge_router = SessionRouter(Path(_BRIDGE_SESSIONS_FILE))
+        return self.bridge_router.current(channel_id)
+
+    def _resolve_sid(self, channel_id: int) -> str | None:
+        """Unified channel->session lookup across both routers.
+
+        Returns the main bot's binding (`self.router`) if present, else the
+        bridge's (`_bridged_sid`). The main bot's `SessionRouter` is
+        authoritative for `/oc` and `/oc_plan` channels; the bridge's is
+        authoritative for Comulytic-routed channels. A channel is only ever
+        bound in one of the two files, so the order is unambiguous.
+        """
+        sid = self.router.current(channel_id)
+        if sid is not None:
+            return sid
+        return self._bridged_sid(channel_id)
 
     def _is_guild_configured(self) -> bool:
         """True if ANY of `/oc_setup`'s *output* settings is already configured.
@@ -1397,7 +1466,13 @@ class OpencodeBot(discord.Bot):
         """
         if message.author.bot:
             return
-        sid = self.router.current(message.channel.id)
+        # Unified lookup: consult the main bot's router first, then fall
+        # back to the Comulytic bridge's router so a user returning to a
+        # bridge-created channel hours later can resume the session with
+        # a plain-text follow-up (the bridge's initial turn has long since
+        # ended; the follow-up is driven by `_drive_session` here in the
+        # main bot, which owns the gateway + button question poller).
+        sid = self._resolve_sid(message.channel.id)
         voice_att = (
             self._voice_attachment(message) if config.voice_message_enabled else None
         )
@@ -1687,8 +1762,8 @@ class OpencodeBot(discord.Bot):
             return
         if before.content == after.content:
             return  # no-op edit (e.g. embed/thumbnail change only)
-        # (b) Not a session channel?
-        sid = self.router.current(after.channel.id)
+        # (b) Not a session channel? (unified lookup — bridge channels too)
+        sid = self._resolve_sid(after.channel.id)
         if sid is None:
             return
         # (c) No mapping for this Discord message?

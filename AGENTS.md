@@ -153,7 +153,26 @@ control bot.
 - **`SessionRouter`** (`session_router.py`) — maps Discord channel id ->
   opencode session id, persisted to `.opencode-discord-bot-sessions.json`
   (gitignored). One persistent opencode session per Discord channel. Loaded
-  on construction, saved after each new binding.
+  on construction, saved after each new binding. **Bridge-channel resume:**
+  `OpencodeBot` consults BOTH this router AND the Comulytic bridge's router
+  (`.opencode-discord-bridge-sessions.json`, the file the bridge writes when
+  it creates a channel for a routed recording). The unified lookup
+  `OpencodeBot._resolve_sid(channel_id)` returns the main bot's binding if
+  present, else the bridge's. This powers `on_message` plain-text follow-ups
+  (a user returning to a bridge-created channel hours later resumes the
+  session via the existing `_run_followup` → `_drive_session` path, which
+  spawns the main bot's button-based `poll_pending_requests`), plus
+  `on_message_edit`, `_channel_ok`, and the `/oc_session` / `/oc_abort` slash
+  commands. `/oc_new` and `/oc_cleanup` `reset` the binding in BOTH routers
+  (`reset` is a no-op when the channel isn't bound). The bridge router handle
+  is constructed lazily on first `_bridged_sid` call
+  (`self.bridge_router` is `None` until then), so deployments without the
+  bridge never open the file. The main bot only READS the bridge file (and
+  `reset`s entries); the bridge OWNS writes to it, so the two processes never
+  clobber each other. The filename is mirrored as a string constant in
+  `commands.py:_BRIDGE_SESSIONS_FILE` (NOT imported from `bridge.py` to
+  avoid pulling the bridge's full import surface into the main bot's module
+  top) — keep the two constants in sync.
 - **`BotConfig`** (`config.py`) — `pydantic-settings` `BaseSettings` with
   ONLY bot-relevant fields (Discord, opencode-serve, voice, faster-whisper,
   OpenAI, slug LLM). All defaults are empty/safe (NO committed secrets). The
@@ -215,7 +234,10 @@ control bot.
   alongside the main bot, which owns the gateway session). Binds channels in
   a **separate** persistence file `.opencode-discord-bridge-sessions.json`
   (NOT `.opencode-discord-bot-sessions.json`) so the bridge's channel bindings
-  don't clobber the main bot's. `text_utils.py` is the Pycord-free shared module for
+  don't clobber the main bot's. **The main bot reads this file** (see the
+  `SessionRouter` bullet above) so plain-text follow-ups in bridge-created
+  channels resume the session after the bridge's initial turn ends; the
+  bridge remains the sole WRITER. `text_utils.py` is the Pycord-free shared module for
   `_split_message`/`_extract_text`/`_final_assistant_text`/`_slugify_prompt`
   (imported by both `commands.py` and `bridge.py`). When Discord isn't
   configured, `route_to_plan_author` falls back to log-only.

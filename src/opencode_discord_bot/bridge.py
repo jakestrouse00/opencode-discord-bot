@@ -92,6 +92,11 @@ _PLAN_AUTHOR_TIMEOUT = 600.0
 # session id). SEPARATE from the main bot's `.opencode-discord-bot-sessions.json`
 # so the two processes don't clobber each other's writes (the main bot owns
 # its channels; the bridge owns its channels). Gitignored — runtime state.
+# The main bot (`commands.py`) mirrors this filename in `_BRIDGE_SESSIONS_FILE`
+# (kept as a string constant there rather than imported here to avoid
+# pulling the bridge's full import surface into the main bot's module top)
+# so `OpencodeBot` can READ this file and `reset` entries on `/oc_new` /
+# `/oc_cleanup` — keep the two constants in sync if you rename this file.
 _BRIDGE_SESSIONS_FILE = ".opencode-discord-bridge-sessions.json"
 
 # Throttle for editing the "Working on session…" progress message in the

@@ -2,9 +2,9 @@
 description: "Use when the user wants to author a detailed, reasoned change plan for this project — drafting the outline of a code change with per-step justification before any edit is made. Triggers on phrases like 'plan a change', 'draft a plan for', 'what should I change for', 'write a plan for', 'outline the refactor', 'plan this update'. Also handles notes-for-later: when the user is recording a future idea rather than an actionable change, it emits a Note plan instead of an Actionable plan. Subagent mode — not selectable in the desktop GUI; invoked via the Task tool or the Discord bot's agent='plan-author' route. Only writes to .opencode/plans/; reads the whole project."
 mode: subagent
 hidden: true
-model: ollama-cloud/glm-5.2
+model: ollama-cloud/gpt-oss:120b-cloud
 temperature: 0.3
-variant: high
+variant: medium
 permission:
   edit:
     "*": "allow"
