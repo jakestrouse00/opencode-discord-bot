@@ -57,6 +57,7 @@ import sys
 from pathlib import Path
 
 from opencode_discord_bot.bridge_questions import poll_pending_requests_rest
+from opencode_discord_bot.bridge_state import clear_active, mark_active
 from opencode_discord_bot.comulytic import (
     AudioUrlExpiredError,
     ComulyticClient,
@@ -750,13 +751,14 @@ async def _transcribe_and_route(
                 "skipped_reason": "duration_exceeds_cap",
             }
 
-    from opencode_discord_bot.voice import extract_audio_to_wav, transcribe_audio
+    from opencode_discord_bot.voice import extract_audio_to_wav
+    from opencode_discord_bot.speakers import transcribe_with_speakers
 
     try:
         wav_bytes = await extract_audio_to_wav(
             audio_bytes, content_type="audio/mpeg", filename=f"{note_id}.mp3"
         )
-        transcript = (await transcribe_audio(wav_bytes) or "").strip()
+        transcript = (await transcribe_with_speakers(wav_bytes) or "").strip()
     except Exception as exc:  # noqa: BLE001 — ffmpeg/whisper failures
         _log.error("recording %s: local Whisper STT failed: %s", note_id, exc)
         return {
@@ -998,9 +1000,9 @@ async def route_to_plan_author(
             if plan_type == "actionable"
             else "[PLAN_TYPE_PRESELECTED: note]"
         )
-        prompt = f"[COMULYTIC_BRIDGE]\n{directive}\n\n{transcript}"
+        prompt = f"[DISCORD_BOT]\n[COMULYTIC_BRIDGE]\n{directive}\n\n{transcript}"
     else:
-        prompt = f"[COMULYTIC_BRIDGE]\n\n{transcript}"
+        prompt = f"[DISCORD_BOT]\n[COMULYTIC_BRIDGE]\n\n{transcript}"
 
     # --- Create the Discord channel + post the transcript BEFORE the prompt ---
     progress_msg_id: int | None = None
@@ -1110,6 +1112,14 @@ async def route_to_plan_author(
             "response": "",
         }
 
+    # Mark this sid as bridge-driven so the main bot's `on_message` yields
+    # silently to our REST reply-poller instead of re-dispatching each
+    # clarifying-question answer as a fresh `send_prompt_async` follow-up
+    # (the dual-consumer race that produced "Session is busy" errors and
+    # duplicate final-response messages). Cleared in the `finally` wrapping
+    # the drive below. See opencode_discord_bot.bridge_state.
+    mark_active(sid)
+
     _log.info(
         "recording %s: prompt sent to plan-author (session=%s, discord=%s) — "
         "waiting for completion",
@@ -1167,85 +1177,93 @@ async def route_to_plan_author(
             )
         )
 
-    # --- Poll until idle ---
+    # --- Drive the session to idle, then post the final response ---
+    # Wrapped in try/finally so `clear_active(sid)` always runs — on success,
+    # timeout, OpencodeError, and cancellation (the bot's `close()` cancels
+    # the in-process bridge task). Once the drive ends the main bot's
+    # `on_message` may resume driving follow-ups for this channel.
     try:
-        await poll_until_idle(opencode, sid, _on_status, timeout=_PLAN_AUTHOR_TIMEOUT)
-    except asyncio.TimeoutError:
-        _log.warning(
-            "recording %s: plan-author timed out after %.0fs — fetching partial output",
-            note_id,
-            _PLAN_AUTHOR_TIMEOUT,
-        )
-    except OpencodeError as exc:
-        _log.error("recording %s: poll_until_idle failed: %s", note_id, exc)
-
-    # Stop the question poller.
-    stop_event.set()
-    if poller is not None:
+        # --- Poll until idle ---
         try:
-            await asyncio.wait_for(poller, timeout=5.0)
-        except (asyncio.TimeoutError, asyncio.CancelledError):
-            poller.cancel()
+            await poll_until_idle(opencode, sid, _on_status, timeout=_PLAN_AUTHOR_TIMEOUT)
+        except asyncio.TimeoutError:
+            _log.warning(
+                "recording %s: plan-author timed out after %.0fs — fetching partial output",
+                note_id,
+                _PLAN_AUTHOR_TIMEOUT,
+            )
+        except OpencodeError as exc:
+            _log.error("recording %s: poll_until_idle failed: %s", note_id, exc)
 
-    # --- Fetch the final assistant text ---
-    try:
-        messages = await opencode.list_messages(sid)
-    except OpencodeError as exc:
-        _log.error("recording %s: list_messages failed: %s", note_id, exc)
+        # Stop the question poller.
+        stop_event.set()
+        if poller is not None:
+            try:
+                await asyncio.wait_for(poller, timeout=5.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                poller.cancel()
+
+        # --- Fetch the final assistant text ---
+        try:
+            messages = await opencode.list_messages(sid)
+        except OpencodeError as exc:
+            _log.error("recording %s: list_messages failed: %s", note_id, exc)
+            return {
+                "note_id": note_id,
+                "transcript": transcript,
+                "session_id": sid,
+                "response": "",
+            }
+
+        final = _final_assistant_text(messages) if messages else ""
+        _log.info(
+            "recording %s: plan-author done (session=%s, response_len=%d)",
+            note_id,
+            sid,
+            len(final),
+        )
+        if final:
+            _log.info("plan-author response for %s:\n%s", note_id, final)
+
+        # --- Post the response to the Discord channel ---
+        if discord_active and channel_id is not None and rest is not None:
+            if not final:
+                try:
+                    await rest.create_message(
+                        channel_id, f"Done (no text output). Session `{sid}` is now idle."
+                    )
+                except DiscordRestError as exc:
+                    _log.warning("recording %s: post done-msg failed: %s", note_id, exc)
+            else:
+                prefix = f"**opencode** (session `{sid}`):\n"
+                for chunk in _split_message(prefix + final):
+                    try:
+                        await rest.create_message(channel_id, chunk)
+                    except DiscordRestError as exc:
+                        _log.warning(
+                            "recording %s: post response chunk failed: %s", note_id, exc
+                        )
+                        break
+
+            # Optional pointer to the configured trigger channel.
+            pointer_id = config.comulytic_discord_pointer_channel_id
+            if pointer_id:
+                try:
+                    await rest.create_message(
+                        pointer_id,
+                        f"Created <#{channel_id}> — routed Comulytic note `{note_id}` to plan-author.",
+                    )
+                except DiscordRestError as exc:
+                    _log.warning("recording %s: post pointer failed: %s", note_id, exc)
+
         return {
             "note_id": note_id,
             "transcript": transcript,
             "session_id": sid,
-            "response": "",
+            "response": final,
         }
-
-    final = _final_assistant_text(messages) if messages else ""
-    _log.info(
-        "recording %s: plan-author done (session=%s, response_len=%d)",
-        note_id,
-        sid,
-        len(final),
-    )
-    if final:
-        _log.info("plan-author response for %s:\n%s", note_id, final)
-
-    # --- Post the response to the Discord channel ---
-    if discord_active and channel_id is not None and rest is not None:
-        if not final:
-            try:
-                await rest.create_message(
-                    channel_id, f"Done (no text output). Session `{sid}` is now idle."
-                )
-            except DiscordRestError as exc:
-                _log.warning("recording %s: post done-msg failed: %s", note_id, exc)
-        else:
-            prefix = f"**opencode** (session `{sid}`):\n"
-            for chunk in _split_message(prefix + final):
-                try:
-                    await rest.create_message(channel_id, chunk)
-                except DiscordRestError as exc:
-                    _log.warning(
-                        "recording %s: post response chunk failed: %s", note_id, exc
-                    )
-                    break
-
-        # Optional pointer to the configured trigger channel.
-        pointer_id = config.comulytic_discord_pointer_channel_id
-        if pointer_id:
-            try:
-                await rest.create_message(
-                    pointer_id,
-                    f"Created <#{channel_id}> — routed Comulytic note `{note_id}` to plan-author.",
-                )
-            except DiscordRestError as exc:
-                _log.warning("recording %s: post pointer failed: %s", note_id, exc)
-
-    return {
-        "note_id": note_id,
-        "transcript": transcript,
-        "session_id": sid,
-        "response": final,
-    }
+    finally:
+        clear_active(sid)
 
 
 async def _resolve_bot_user_id(rest: DiscordRest) -> int | None:

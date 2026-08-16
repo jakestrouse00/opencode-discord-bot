@@ -40,6 +40,7 @@ from typing import Any, Awaitable, Callable
 
 import discord
 
+from opencode_discord_bot.bridge_state import is_active as _bridge_is_active
 from opencode_discord_bot.events import SessionStatus, poll_until_idle
 from opencode_discord_bot.opencode_client import OpencodeClient, OpencodeError
 from opencode_discord_bot.questions import poll_pending_requests
@@ -59,6 +60,7 @@ from opencode_discord_bot.voice import (
     is_transcribable_attachment,
     transcribe_audio,
 )
+from opencode_discord_bot.speakers import transcribe_with_speakers
 from opencode_discord_bot.opencode_serve import OpencodeServe, _REPO_ROOT
 from opencode_discord_bot.config import config, reload_config
 from opencode_discord_bot.env_writer import update_env_file
@@ -268,7 +270,9 @@ class OpencodeBot(discord.Bot):
                     if plan_type == "actionable"
                     else "[PLAN_TYPE_PRESELECTED: note]"
                 )
-                prompt = f"{directive}\n\n{change}"
+                prompt = f"[DISCORD_BOT]\n{directive}\n\n{change}"
+            else:
+                prompt = f"[DISCORD_BOT]\n\n{change}"
             _log.info(
                 "/oc_plan received (user=%s, channel=%s, guild=%s, plan_type=%s): %s",
                 ctx.author,
@@ -1478,6 +1482,24 @@ class OpencodeBot(discord.Bot):
         )
         # (a) Voice follow-up in an existing session channel.
         if sid is not None and voice_att is not None:
+            # If the Comulytic bridge is currently driving this session
+            # (clarifying questions in flight / prompt mid-turn), yield
+            # silently — the bridge's REST reply-poller will consume the
+            # reply and bundle it into a single `reply_question` call.
+            # Without this the main bot races the bridge: it re-dispatches
+            # each answer as a fresh `send_prompt_async` follow-up, the
+            # second answer hits "Session is busy", and both paths post a
+            # final response (duplicate success messages). The bridge
+            # clears `is_active` in its drive's `finally` once it goes idle,
+            # after which plain-text follow-ups here resume normally.
+            if _bridge_is_active(sid):
+                _log.info(
+                    "follow-up yielded to comulytic bridge: voice message in #%s "
+                    "(session %s)",
+                    message.channel.name,
+                    sid,
+                )
+                return
             if sid in self._active_drives:
                 _log.info(
                     "follow-up rejected (session %s busy): voice message in #%s",
@@ -1500,6 +1522,20 @@ class OpencodeBot(discord.Bot):
         # (b) Text follow-up in an existing session channel (existing path).
         if sid is not None and voice_att is None:
             if not message.content:
+                return
+            # Same bridge-yield as branch (a): when the Comulytic bridge is
+            # mid-turn on this sid, its REST reply-poller is already
+            # consuming channel messages as clarifying-question answers and
+            # bundling them into one `reply_question` per request. Re-dispatching
+            # here as a fresh `send_prompt_async` races the bridge (produces
+            # "Session is busy" + duplicate final responses). Yield silently;
+            # the bridge clears `is_active` when its drive ends.
+            if _bridge_is_active(sid):
+                _log.info(
+                    "follow-up yielded to comulytic bridge: text in #%s (session %s)",
+                    message.channel.name,
+                    sid,
+                )
                 return
             if sid in self._active_drives:
                 _log.info(
@@ -1658,7 +1694,7 @@ class OpencodeBot(discord.Bot):
                 content_type=attachment.content_type,
                 filename=attachment.filename,
             )
-            transcript = await transcribe_audio(wav_bytes)
+            transcript = await transcribe_with_speakers(wav_bytes)
         except Exception as e:  # noqa: BLE001 — transcription failures are user-facing
             _log.warning("voice-message follow-up transcription failed: %r", e)
             await status_msg.edit(
@@ -2018,7 +2054,9 @@ class OpencodeBot(discord.Bot):
 
         prompt = cleaned
         if session.mode == "note":
-            prompt = f"[PLAN_TYPE_PRESELECTED: note]\n\n{cleaned}"
+            prompt = f"[DISCORD_BOT]\n[PLAN_TYPE_PRESELECTED: note]\n\n{cleaned}"
+        else:
+            prompt = f"[DISCORD_BOT]\n\n{cleaned}"
 
         parts = [{"type": "text", "text": prompt}]
         try:
@@ -2165,7 +2203,7 @@ class OpencodeBot(discord.Bot):
                 content_type=recording.content_type,
                 filename=recording.filename,
             )
-            transcript = await transcribe_audio(wav_bytes)
+            transcript = await transcribe_with_speakers(wav_bytes)
         except Exception as e:  # noqa: BLE001 — transcription failures are user-facing
             _log.warning("/oc_talk transcription failed: %r", e)
             await status_msg.edit(
@@ -2205,7 +2243,9 @@ class OpencodeBot(discord.Bot):
                 if plan_type == "actionable"
                 else "[PLAN_TYPE_PRESELECTED: note]"
             )
-            prompt = f"{directive}\n\n{transcript}"
+            prompt = f"[DISCORD_BOT]\n{directive}\n\n{transcript}"
+        else:
+            prompt = f"[DISCORD_BOT]\n\n{transcript}"
 
         parts = [{"type": "text", "text": prompt}]
         try:
@@ -2333,7 +2373,7 @@ class OpencodeBot(discord.Bot):
                 content_type=attachment.content_type,
                 filename=attachment.filename,
             )
-            transcript = await transcribe_audio(wav_bytes)
+            transcript = await transcribe_with_speakers(wav_bytes)
         except Exception as e:  # noqa: BLE001 — transcription failures are user-facing
             _log.warning("voice-message transcription failed: %r", e)
             await status_msg.edit(
@@ -2363,7 +2403,7 @@ class OpencodeBot(discord.Bot):
         # directive (a plain message has no slash-option UI, so let the agent
         # classify from the transcript wording — matches /oc_talk with
         # plan_type=None).
-        parts = [{"type": "text", "text": transcript}]
+        parts = [{"type": "text", "text": f"[DISCORD_BOT]\n\n{transcript}"}]
         try:
             await self.client.send_prompt_async(sid, parts, agent="plan-author")
         except OpencodeError as e:

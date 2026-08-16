@@ -44,6 +44,18 @@ dependencies = [
     "openai",
 ]
 
+# Optional speaker identification (diarization) extra. Pulls in the heavy
+# torch + pyannote.audio stack (~1-2GB). The bot starts fine WITHOUT this
+# extra installed — speaker ID degrades to the existing anonymous
+# single-string transcript when `speakers.py` can't import pyannote or
+# when the `Speakers/` folder is absent. Install with:
+#   pip install 'opencode-discord-bot[speakers]'
+# (Note: pyannote.audio 3.x downloads pretrained models from HuggingFace
+# on first use — accept the model licenses + set HF_TOKEN before first
+# run. This is a runtime concern, not a code dep.)
+[project.optional-dependencies]
+speakers = ["pyannote.audio>=3.3"]
+
 [project.urls]
 Homepage = "https://github.com/jakestrouse00/opencode-discord-bot"
 Repository = "https://github.com/jakestrouse00/opencode-discord-bot"

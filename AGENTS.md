@@ -49,10 +49,23 @@ control bot.
   for plain-text follow-ups to work. The bot sets `intents.message_content =
   True` in `OpencodeBot.__init__`; the portal toggle is separate. Without it,
   `message.content` is always empty and follow-ups silently break.
-- **No tests, no linter, no type-checker, no build step** are configured in
-  this repo. The only meaningful automated check is the Python import sanity
-  check: `python -c "from opencode_discord_bot.commands import OpencodeBot;
-  print('ok')"`.
+- **Tests:** pytest + pytest-asyncio (in the shared root `.venv`). Run from
+  `opencode-discord-bot/`:
+    - `pytest` — full suite
+    - `pytest tests/unit` — unit tests only (fast; pyannote-guarded ones skip
+      when `HF_TOKEN` is unset)
+    - `pytest tests/chain` — chain tests (real STT + ffmpeg on the committed
+      `Speakers/Jake/clip*.mp3` fixtures; pyannote variants skip without
+      `HF_TOKEN`)
+    - `pytest -k comulytic` — only Comulytic-chain tests
+  No network, no gateway, no real opencode/Discord/Comulytic calls — all
+  network boundaries are scriptable fakes in `tests/fakes.py`. STT + ffmpeg
+  run real on the committed sample clips; speaker-ID tests auto-skip when
+  `HF_TOKEN` is unset or `pyannote.audio` isn't importable (the ~1-2GB
+  first-run HuggingFace download needs the token + license acceptance).
+- **No linter, no type-checker, no build step** are configured in this repo.
+  The only other automated check is the Python import sanity check:
+  `python -c "from opencode_discord_bot.commands import OpencodeBot; print('ok')"`.
 
 ## Architecture
 
@@ -205,6 +218,51 @@ control bot.
   new sessions (no slash-option UI) — the `plan-author` agent classifies from
   the transcript. No new deps; reuses the `/oc_talk` pipeline verbatim. Does
   NOT touch `/oc_voice` or the DAVE-broken sinks path.
+- **Speaker identification** (`speakers.py`): layers per-speaker labels on
+  top of the anonymous STT path so multi-speaker recordings (meetings, not
+  just solo notes) produce a diarized, speaker-labeled transcript that
+  plan-author can turn into coherent meeting notes. Three public functions:
+  `load_speakers()` (reads reference embeddings from `Speakers/<name>/`
+  subfolders), `identify_speakers()` (diarize + cosine-match each turn
+  against reference embeddings + label unknowns `Speaker N`; unwraps the
+  pyannote 4.x `DiarizeOutput` dataclass and reuses the precomputed
+  `speaker_embeddings` rather than re-embedding per turn), and
+  `transcribe_with_speakers()` (the async orchestrator that callers use —
+  falls back to `voice.transcribe_audio` when speaker ID is disabled,
+  pyannote isn't installed, or `Speakers/` is empty). Engine: pyannote.audio
+  (diarization + 256-dim voice embeddings via
+  `wespeaker-voxceleb-resnet34-LM`), an **optional** dep via the
+  `speakers` extra: `pip install 'opencode-discord-bot[speakers]'` (pulls
+  the heavy torch stack, ~1-2GB). The bot starts fine WITHOUT it — speaker
+  ID degrades to the existing anonymous transcript. **Setup:** drop
+  reference audio files (`.wav`/`.mp3`/`.m4a`/`.ogg`/`.flac`) into
+  `Speakers/<name>/` (one subfolder per speaker; the folder name is the
+  default speaker label) at the bot's repo root (i.e. next to `pyproject.toml`
+  / `.env`, so it ships with the repo), or override the location via
+  `SPEAKERS_DIR`. **Resolution of a relative `SPEAKERS_DIR`:** the bot
+  tries the process cwd first, then falls back to its own repo root
+  (derived from the package install location) — so launching from a parent
+  dir (e.g. a multi-project workspace root) still finds `Speakers/` in the
+  bot subdir. An absolute `SPEAKERS_DIR` is used as-is. A missing
+  `Speakers/` logs a WARNING and yields `{}` from `load_speakers()` →
+  anonymous STT. Adding/removing reference audio requires a bot restart
+  (embeddings are cached per process, same convention as the whisper model
+  singleton).   **HuggingFace:** pyannote.audio 3.x downloads pretrained
+  models on first use — accept the model licenses + set `HF_TOKEN` before
+  first run (runtime concern, not a code dep). Four gated models:
+  `pyannote/speaker-diarization-3.1` (the pipeline),
+  `pyannote/segmentation-3.0` (segmentation sub-model),
+  `pyannote/wespeaker-voxceleb-resnet34-LM` (embedding sub-model), and
+  `pyannote/speaker-diarization-community-1` (PLDA — a default param of
+  the `SpeakerDiarization` pipeline class, not overridden by the 3.1
+  config). The `hf_token` `BotConfig` field (env var `HF_TOKEN`) carries
+  the token; `speakers.py` reads `config.hf_token` (not `os.environ`) so
+  the `.env` entry "just works". **Scope:** the three
+  meeting-capture entry points (`/oc_talk`, voice-message intake, Comulytic
+  bridge) call `transcribe_with_speakers`; the live `/oc_voice` chunked
+  path (`VoiceSession._transcribe_current_sink`, voice.py:580) stays on
+  `transcribe_audio` (whole-file diarization doesn't fit the chunked model
+  and `/oc_voice` is DAVE-broken anyway — see Known-broken).
 - **Slug LLM** (`slug.py`): `generate_slug()` makes one `httpx` POST to an
   OpenAI-compatible `/chat/completions` endpoint (Ollama Cloud by default) to
   produce a Discord channel-name slug from the user's prompt. NEVER raises —
@@ -330,6 +388,8 @@ control bot.
   `VOICE_STT_PROVIDER` / `VOICE_STT_MODEL` / `VOICE_LOCAL_WHISPER_MODEL` /
   `VOICE_TTS_ENABLED` / `VOICE_TTS_MODEL` / `VOICE_TTS_VOICE` /
   `VOICE_TTS_SPEED` / `WHISPER_MODEL` / `WHISPER_DEVICE` / `WHISPER_COMPUTE_TYPE`
+  / `SPEAKERS_DIR` / `SPEAKER_ID_ENABLED` / `SPEAKER_MATCH_THRESHOLD`
+  / `HF_TOKEN`
   / `OPENAI_API_KEY` / `OLLAMA_API_URL` / `OLLAMA_AUTH_KEY` / `SLUG_MODEL` /
   `SLUG_TIMEOUT_SECONDS` / `COMULYTIC_ENABLED` / `COMULYTIC_JWT` /
   `COMULYTIC_REFRESH_TOKEN` / `COMULYTIC_API_BASE` / `COMULYTIC_WEB_BASE` /

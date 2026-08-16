@@ -24,6 +24,7 @@ Env-var overrides (uppercase of the field name):
   / VOICE_STT_MODEL / VOICE_LOCAL_WHISPER_MODEL / VOICE_TTS_ENABLED
   / VOICE_TTS_MODEL / VOICE_TTS_VOICE / VOICE_TTS_SPEED
   WHISPER_MODEL / WHISPER_DEVICE / WHISPER_COMPUTE_TYPE
+  SPEAKERS_DIR / SPEAKER_ID_ENABLED / SPEAKER_MATCH_THRESHOLD
   OPENAI_API_KEY
   OLLAMA_API_URL / OLLAMA_AUTH_KEY / SLUG_MODEL / SLUG_TIMEOUT_SECONDS
   COMULYTIC_ENABLED / COMULYTIC_JWT / COMULYTIC_REFRESH_TOKEN
@@ -151,6 +152,40 @@ class BotConfig(BaseSettings):
     # CTranslate2 compute type: "int8" (CPU), "float16" (GPU), "int8_float16"
     # (GPU mixed), etc. `int8` is the CPU default.
     whisper_compute_type: str = "int8"
+
+    # --- speaker identification (diarization, optional) ---
+    # Speaker ID adds per-speaker labels to multi-speaker recordings
+    # (meetings, not just solo notes) so the plan-author agent can produce
+    # coherent meeting notes. Layered on top of `transcribe_audio` (the
+    # anonymous STT primitive stays unchanged); requires the optional
+    # `speakers` extra (`pip install 'opencode-discord-bot[speakers]'`) and
+    # a `Speakers/<name>/` folder of reference audio. Degrades gracefully:
+    # when `speaker_id_enabled` is False, OR pyannote.audio isn't installed,
+    # OR `Speakers/` is absent/empty, `transcribe_with_speakers` falls back
+    # to the existing anonymous single-string transcript — no error.
+    # Directory holding reference audio samples per speaker. Each subfolder
+    # is one speaker (the folder name is the default speaker label); each
+    # audio file in it (`.wav`/`.mp3`/`.m4a`/`.ogg`/`.flac`) is a reference
+    # sample. A relative path resolves against the bot's launch cwd (same
+    # convention as `comulytic_state_file`).
+    speakers_dir: str = "Speakers"
+    # Master toggle. When False, skip diarization entirely and return the
+    # anonymous transcript. When True but pyannote isn't installed / `Speakers/`
+    # is empty, log a warning and fall back to anonymous.
+    speaker_id_enabled: bool = True
+    # Cosine-similarity cutoff for matching a turn's embedding to a known
+    # speaker's reference embeddings. A turn is attributed to the known
+    # speaker with the max cosine similarity ONLY if that max exceeds this
+    # threshold; otherwise the turn gets a generic `Speaker N` label.
+    speaker_match_threshold: float = 0.75
+
+    # HuggingFace access token — read by speakers.py for pyannote.audio
+    # pretrained-model downloads (pyannote/speaker-diarization-3.1 +
+    # wespeaker-voxceleb-resnet34-LM are gated models). Empty = pyannote
+    # will 401 on first model load; speaker ID then raises + the
+    # transcribe_with_speakers orchestrator falls back to anonymous STT.
+    # Get one at https://huggingface.co/settings/tokens (read scope).
+    hf_token: str = ""
 
     # --- OpenAI (TTS only — STT cloud path also uses this key) ---
     # Needed for TTS (voice_tts_enabled=True) and for the cloud STT fallback

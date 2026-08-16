@@ -65,6 +65,10 @@ When the prompt begins with `[PLAN_TYPE_PRESELECTED: actionable]` or `[PLAN_TYPE
 
 When the prompt begins with `[COMULYTIC_BRIDGE]`, the session is being driven by the Comulytic bridge, which surfaces clarifying questions as plain-text prompts in a Discord channel and polls for the user's plain-text reply via the REST API. **Buttons and select menus cannot be used** — the bridge does not own the gateway connection, so it cannot receive component-interaction events. Strip the `[COMULYTIC_BRIDGE]` directive line and treat the rest of the prompt normally, but constrain your clarifying-question behavior per the "How to ask" rule in Step 2.5: **exactly one question per `question` tool call** (one entry in the `questions` array), never 2-3. If you need more clarification after the first answer, ask again in the next turn — do not batch questions in a single call. This directive is independent of `[PLAN_TYPE_PRESELECTED: ...]` (either, both, or neither may be present).
 
+### Discord bot (summary output, no execute hint)
+
+When the prompt begins with `[DISCORD_BOT]`, the session is being driven by the Discord bot (a `/oc_plan`, `/oc_voice`, `/oc_talk`, voice-message trigger, or Comulytic-bridge invocation). The bot's users treat plans and notes as a thinking-out-loud log — they capture thoughts from their phone or voice and want to recall what a plan/note is about at a glance without re-reading the transcript. **Strip the `[DISCORD_BOT]` directive line FIRST (it is always line 1, before `[COMULYTIC_BRIDGE]` and `[PLAN_TYPE_PRESELECTED: ...]` when those are also present), then strip the other directive lines as usual, then process the rest of the prompt normally.** In Step 7, emit the summary block described there instead of the "execute `<slug>`" / "promote note `<slug>`" pointer line — the bot's users don't execute from the bot, so the execute hint is noise. This directive is independent of `[COMULYTIC_BRIDGE]` and `[PLAN_TYPE_PRESELECTED: ...]`; any combination may be present. Strip all directive lines before processing the change/idea text.
+
 ### Classification heuristics (decide, then state it)
 
 | Signal | Actionable | Note |
@@ -250,6 +254,20 @@ After writing the file:
 - For a **note**: output exactly one line:
   > Note saved to `.opencode/plans/notes/<slug>.md` — ask me to "promote note <slug>" when you're ready to turn it into an actionable plan.
 
+- For **either type when `[DISCORD_BOT]` was present in the prompt**: emit the summary block below instead of the pointer lines above. The summary block REPLACES (does not supplement) the actionable/note pointer lines — do NOT print the "execute `<slug>`" / "promote note `<slug>`" hint on this path; the bot's users don't execute from the bot, so the hint is noise. The summary block is:
+  - For an actionable plan:
+    ```
+    **Plan type: actionable**
+    **Plan:** `<slug>` — written to `.opencode/plans/<slug>.md`
+    **Summary:** <1–3 sentences: the intended change, what it touches, and the outcome it produces — concrete enough to recall at a glance without re-reading the transcript>
+    ```
+  - For a note:
+    ```
+    **Plan type: note**
+    **Note:** `<slug>` — saved to `.opencode/plans/notes/<slug>.md`
+    **Summary:** <1–3 sentences: the idea, what it would touch, and why it matters>
+    ```
+
 Then **stop**. You do not execute the plan. You do not make edits. You do not ask "want me to go ahead?" — execution is a separate, user-gated act. The next message is for the user to send, not you.
 
 ## Coordination Rules
@@ -282,3 +300,5 @@ The first output line below may be preceded by a `question` tool call for clarif
 2. (Actionable only) A brief exploration summary: the files/symbols you confirmed and any deviation from the user's stated goal that the exploration forced.
 3. The pointer line from Step 7.
 4. Stop. No prose epilogue, no "let me know if you want me to adjust anything", no re-explanation of the plan in chat — the plan file is the artifact.
+
+**When `[DISCORD_BOT]` is present**, the summary block from Step 7's third bullet replaces ALL of items 1–3 above: the summary block already opens with `**Plan type:** …`, the exploration summary (item 2) is suppressed (the bot's users don't want transcript-style detail), and the pointer line (item 3) is replaced by the summary's `**Summary:**` line. The bot-path output is the summary block only, then stop.
