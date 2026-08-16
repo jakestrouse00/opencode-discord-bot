@@ -33,9 +33,9 @@ Reply parsing (the user types plain text in the channel):
     ``info.custom`` is not False). Multi-select is not supported via plain
     text — the user types one label or number and we send a single-element
     list (a simplification; the multi-question path below handles N>1).
-  - Multiple questions: the user posts one reply per question, in order.
-    The poller waits for N non-bot messages after the question message,
-    one per question, each parsed as above.
+  - Multiple questions: the poller posts each question as its own message
+    ("Question i of N"), waits for one reply per message, then posts the
+    next. Each reply is parsed as above.
   - Permission: "y"/"yes" -> "once"; "always" -> "always"; "n"/"no" ->
     "reject".
 
@@ -274,10 +274,12 @@ async def _handle_question(
 ) -> bool:
     """Surface one question request and wait for the user's plain-text reply.
 
-    Posts the question text, waits for one reply per question (in order),
-    parses each into a label list, and calls ``reply_question``. On timeout
-    or parse failure, calls ``reject_question``. Returns True if the
-    question was resolved (replied or rejected), False on a post failure.
+    Posts each question one at a time (labelled "Question i of N"), waits
+    for the user's reply to each before posting the next, parses each
+    into a label list, and calls ``reply_question`` with the assembled
+    answers. On timeout or parse failure for any single question, calls
+    ``reject_question``. Returns True if the question was resolved
+    (replied or rejected), False on a post failure.
     """
     rid = request.get("id", "")
     questions = request.get("questions") or []
@@ -289,31 +291,38 @@ async def _handle_question(
             _log.warning("empty reply_question for %s failed: %s", rid, exc)
         return True
 
-    blocks = [_question_block(q) for q in questions]
-    content = (
-        f"**Question** `{rid[:12]}`\n"
-        + "\n\n".join(blocks)
-        + (
-            f"\n\n_Reply in this channel — one message per question, in order. "
-            f"You have {int(question_timeout)}s._"
-            if len(questions) > 1
-            else f"\n\n_Reply in this channel. You have {int(question_timeout)}s._"
-        )
-    )
-    question_msg_id = await _post(rest, channel_id, content)
-    if question_msg_id is None:
-        _log.warning("could not post question %s — rejecting to unblock the agent", rid)
-        try:
-            await client.reject_question(rid)
-        except OpencodeError as exc:
-            _log.warning("reject_question fallback for %s failed: %s", rid, exc)
-        return False
-
     answers: list[list[str]] = []
-    after_id = question_msg_id
+    after_id: int | None = None
+    last_question_msg_id: int | None = None
+    last_single_content: str | None = None
+    n = len(questions)
     for idx, q in enumerate(questions):
+        single_content = (
+            f"**Question {idx + 1} of {n}** `{rid[:12]}`\n"
+            + _question_block(q)
+            + f"\n\n_Reply in this channel. You have {int(question_timeout)}s._"
+        )
+        question_msg_id = await _post(rest, channel_id, single_content)
+        if question_msg_id is None:
+            _log.warning(
+                "could not post question %s (idx %d) — rejecting to unblock the agent",
+                rid,
+                idx,
+            )
+            try:
+                await client.reject_question(rid)
+            except OpencodeError as exc:
+                _log.warning("reject_question fallback for %s failed: %s", rid, exc)
+            return False
+        last_question_msg_id = question_msg_id
+        last_single_content = single_content
+        # For the first question, poll for replies after the question message.
+        # For subsequent questions, poll for replies after the previous reply
+        # (after_id was advanced past the consumed reply at the end of the
+        # previous iteration).
+        poll_after = after_id if after_id is not None else question_msg_id
         reply = await _await_reply(
-            rest, channel_id, after_id, bot_user_id, question_timeout
+            rest, channel_id, poll_after, bot_user_id, question_timeout
         )
         if reply is None:
             _log.warning(
@@ -330,7 +339,7 @@ async def _handle_question(
                 await rest.edit_message(
                     channel_id,
                     question_msg_id,
-                    content
+                    single_content
                     + f"\n_Timed out (question {idx + 1} unanswered) — rejected._",
                 )
             except Exception:  # noqa: BLE001
@@ -352,24 +361,25 @@ async def _handle_question(
                 await rest.edit_message(
                     channel_id,
                     question_msg_id,
-                    content
+                    single_content
                     + f"\n_Could not parse reply for question {idx + 1} — rejected._",
                 )
             except Exception:  # noqa: BLE001
                 pass
             return True
         answers.append(parsed)
-        # Advance the after-snowflake past this reply so we don't re-pick it
-        # for the next question. We don't have the reply's message id here
-        # (we returned content only); list_messages with the same after_id
-        # would re-find it. Instead, poll a fresh batch and skip any messages
-        # whose content matches a reply we've already consumed. Simplest fix:
-        # advance the deadline by re-listing and finding the consumed reply's
-        # id. To keep this simple and robust, we re-query and track consumed
-        # content strings.
+        # Advance the after-snowflake past this reply so the next iteration's
+        # _await_reply poll doesn't re-pick this consumed reply.
         after_id = await _find_reply_msg_id(
-            rest, channel_id, after_id, bot_user_id, reply
+            rest, channel_id, poll_after, bot_user_id, reply
         )
+
+    summary_content = "_All questions answered — submitting._"
+    summary_msg_id = await _post(rest, channel_id, summary_content)
+    submit_edit_id = summary_msg_id if summary_msg_id is not None else last_question_msg_id
+    submit_edit_base = (
+        summary_content if summary_msg_id is not None else (last_single_content or "")
+    )
 
     try:
         await client.reply_question(rid, answers)
@@ -378,8 +388,8 @@ async def _handle_question(
         try:
             await rest.edit_message(
                 channel_id,
-                question_msg_id,
-                content + f"\n_Failed to submit answer: {exc}_",
+                submit_edit_id,
+                submit_edit_base + f"\n_Failed to submit answer: {exc}_",
             )
         except Exception:  # noqa: BLE001
             pass
@@ -387,8 +397,8 @@ async def _handle_question(
     try:
         await rest.edit_message(
             channel_id,
-            question_msg_id,
-            content + "\n_Answered._",
+            submit_edit_id,
+            submit_edit_base + "\n_Answered._",
         )
     except Exception:  # noqa: BLE001
         pass
