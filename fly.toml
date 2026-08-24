@@ -16,8 +16,8 @@
 #
 # Voice (local faster-whisper in-container):
 #   VOICE_STT_PROVIDER        — local
-#   VOICE_LOCAL_WHISPER_MODEL — base (~140MB, CPU-feasible)
-#   WHISPER_MODEL             — base
+#   VOICE_LOCAL_WHISPER_MODEL — small (~244MB, CPU-feasible)
+#   WHISPER_MODEL             — small
 #   WHISPER_DEVICE            — cpu
 #   WHISPER_COMPUTE_TYPE      — int8
 #   VOICE_TTS_ENABLED         — false (TTS is for /oc_voice playback, which is DAVE-broken)
@@ -51,15 +51,23 @@ primary_region = "iad"
 [build]
   dockerfile = "Dockerfile"
 
-# 2GB RAM: faster-whisper `base` (~140MB model, ~500MB RSS at load) + the bot
-# + Pycord + the Comulytic bridge + httpx clients. 1GB is tight when the
-# bridge + a Whisper transcription run concurrently; 2GB is comfortable.
-# shared-cpu-1x is plenty — the bot is I/O-bound (Discord gateway + HTTP
-# polling), not CPU-bound except during transcription.
+# 4GB RAM: faster-whisper `small` (~244MB model, ~1-1.2GB RSS at load) + the
+# bot + Pycord + the Comulytic bridge + httpx clients. Observed peak bot RSS
+# during a single bridge transcription is ~1.3GB (VmHWM), leaving ~0.5GB
+# headroom on a 2GB box with NO swap — the documented "concurrent bridge +
+# transcription" risk window (a second recording arriving mid-transcription,
+# or a /oc slash command round-trip) would push combined RSS past the 2GB
+# ceiling and OOM-kill the bot with no swap to absorb the spike. 4GB restores
+# a healthy ~2.7GB cushion at the observed peak and covers the concurrency
+# window now that the voice.py transcription path runs off the event loop
+# (previously it blocked the loop, implicitly serializing transcriptions;
+# that bug is fixed, so concurrent transcriptions are now possible). shared-cpu-1x
+# is plenty — the bot is I/O-bound (Discord gateway + HTTP polling), not
+# CPU-bound except during transcription.
 [[vm]]
   cpu_kind = "shared"
   cpus = 1
-  memory = "2gb"
+  memory = "4gb"
 
 # Persistent volume for:
 #   .env                              (written by /oc_setup via env_writer)

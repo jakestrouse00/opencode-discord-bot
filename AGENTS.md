@@ -118,13 +118,14 @@ live at the repo root: `Dockerfile`, `fly.toml`, `fly.env.example`,
   ignored, so the IDs would never persist. `/oc_setup` writes them to
   `/data/.env` at runtime.
 - **Machine:** 2GB RAM, `shared-cpu-1x`, 1 CPU (see `fly.toml [[vm]]`).
-  faster-whisper `base` (~140MB model, ~500MB RSS at load) + the bot +
-  Pycord + the Comulytic bridge + httpx clients. 1GB is tight when the
-  bridge + a Whisper transcription run concurrently; 2GB is comfortable.
-  The bot is I/O-bound (Discord gateway + HTTP polling), not CPU-bound
-  except during transcription. **No auto-stop/autostart** — the bot must
-  stay connected to the Discord gateway to receive slash commands +
-  plain-text follow-ups in real time, so Fly's auto-stop is NOT used.
+  faster-whisper `small` (~244MB model, ~1-1.2GB RSS at load) + the bot +
+  Pycord + the Comulytic bridge + httpx clients. 2GB is adequate but
+  tighter than `base` was — concurrent bridge + transcription is the risk
+  window (bump to 4GB if OOMs appear in `flyctl logs`). The bot is
+  I/O-bound (Discord gateway + HTTP polling), not CPU-bound except during
+  transcription. **No auto-stop/autostart** — the bot must stay connected to
+  the Discord gateway to receive slash commands + plain-text follow-ups in
+  real time, so Fly's auto-stop is NOT used.
 - **What's NOT in the image:** the `opencode` binary (remote serve over
   Tailscale instead), the `speakers` extra (pyannote.audio + torch,
   ~1-2GB — speaker ID degrades to anonymous STT, so
@@ -493,6 +494,7 @@ live at the repo root: `Dockerfile`, `fly.toml`, `fly.env.example`,
   `VOICE_MESSAGE_ENABLED` / `VOICE_MESSAGE_TRIGGER_CHANNEL_ID` /
   `VOICE_SILENCE_TIMEOUT_SECONDS` / `VOICE_CHUNK_SECONDS` /
   `VOICE_STT_PROVIDER` / `VOICE_STT_MODEL` / `VOICE_LOCAL_WHISPER_MODEL` /
+  `VOICE_STT_HOTWORDS` / `VOICE_STT_PROMPT` / `VOICE_STT_REPLACEMENTS` /
   `VOICE_TTS_ENABLED` / `VOICE_TTS_MODEL` / `VOICE_TTS_VOICE` /
   `VOICE_TTS_SPEED` / `WHISPER_MODEL` / `WHISPER_DEVICE` / `WHISPER_COMPUTE_TYPE`
   / `SPEAKERS_DIR` / `SPEAKER_ID_ENABLED` / `SPEAKER_MATCH_THRESHOLD`

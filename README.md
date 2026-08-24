@@ -269,6 +269,9 @@ All settings are env vars (uppercase of the field name) or entries in a
 | `VOICE_LOCAL_WHISPER_MODEL` | `medium` | faster-whisper model size |
 | `WHISPER_DEVICE` | `cpu` | `cpu` or `cuda` |
 | `WHISPER_COMPUTE_TYPE` | `int8` | CTranslate2 compute type |
+| `VOICE_STT_HOTWORDS` | (empty) | Space-separated domain words boosted by faster-whisper's decoder (local+auto only) |
+| `VOICE_STT_PROMPT` | (empty) | Context sentence for Whisper's `initial_prompt` (local) / `prompt=` (cloud) |
+| `VOICE_STT_REPLACEMENTS` | (empty) | JSON map of mishearings → corrections applied to the final transcript (e.g. `{"Conulec":"comulytic"}`) |
 | `VOICE_TTS_ENABLED` | `true` | Speak responses in voice channels |
 | `OPENAI_API_KEY` | (empty) | Needed for TTS + cloud STT (skip if TTS off + local STT) |
 | `OLLAMA_AUTH_KEY` | (empty) | LLM channel-name slugs (skip = regex fallback) |

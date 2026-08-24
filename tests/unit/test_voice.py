@@ -129,10 +129,65 @@ async def test_transcribe_audio_cloud_uses_openai(monkeypatch, stub_tts):
     assert result == "stub transcription"
 
 
+async def test_transcribe_audio_cloud_forwards_prompt(monkeypatch):
+    """voice_stt_prompt (non-empty) is forwarded as the cloud API `prompt=`."""
+    monkeypatch.setattr(config, "voice_stt_provider", "openai")
+    monkeypatch.setattr(config, "voice_stt_model", "whisper-1")
+    monkeypatch.setattr(config, "openai_api_key", "stub-key")
+    monkeypatch.setattr(config, "voice_stt_prompt", "The user discusses Comulytic.")
+    monkeypatch.setattr(config, "voice_stt_replacements", "")
+
+    captured: dict = {}
+
+    def _fake_client():
+        class _Fake:
+            class audio:
+                class transcriptions:
+                    @staticmethod
+                    async def create(**kw):
+                        captured.update(kw)
+                        class _R:
+                            text = "stub transcription"
+                        return _R()
+        return _Fake()
+
+    monkeypatch.setattr(voice_mod, "_openai_client", _fake_client)
+    await voice_mod.transcribe_audio(b"fake-wav-bytes")
+    assert captured.get("prompt") == "The user discusses Comulytic."
+
+
+async def test_transcribe_audio_cloud_empty_prompt_is_none(monkeypatch):
+    """Empty voice_stt_prompt forwards `prompt=None` (no bias, API default)."""
+    monkeypatch.setattr(config, "voice_stt_provider", "openai")
+    monkeypatch.setattr(config, "voice_stt_model", "whisper-1")
+    monkeypatch.setattr(config, "openai_api_key", "stub-key")
+    monkeypatch.setattr(config, "voice_stt_prompt", "")
+    monkeypatch.setattr(config, "voice_stt_replacements", "")
+
+    captured: dict = {}
+
+    def _fake_client():
+        class _Fake:
+            class audio:
+                class transcriptions:
+                    @staticmethod
+                    async def create(**kw):
+                        captured.update(kw)
+                        class _R:
+                            text = "stub transcription"
+                        return _R()
+        return _Fake()
+
+    monkeypatch.setattr(voice_mod, "_openai_client", _fake_client)
+    await voice_mod.transcribe_audio(b"fake-wav-bytes")
+    assert captured.get("prompt") is None
+
+
 async def test_transcribe_audio_auto_falls_back_to_cloud_on_local_failure(monkeypatch, stub_tts):
     """Provider=auto: local raises → cloud fallback (stubbed) returns text."""
     monkeypatch.setattr(config, "voice_stt_provider", "auto")
     monkeypatch.setattr(config, "openai_api_key", "stub-key")
+    monkeypatch.setattr(config, "voice_stt_replacements", "")
 
     async def _failing_local(_bytes):
         raise RuntimeError("local whisper broke")
@@ -140,6 +195,61 @@ async def test_transcribe_audio_auto_falls_back_to_cloud_on_local_failure(monkey
     # _openai_client is stubbed via stub_tts.
     result = await voice_mod.transcribe_audio(b"x")
     assert result == "stub transcription"
+
+
+# ---------------------------------------------------------------------------
+# transcribe_audio — STT domain-word replacement map (no Whisper needed)
+# ---------------------------------------------------------------------------
+
+
+async def test_transcribe_audio_applies_replacement_map(monkeypatch):
+    """Mishearings in the final transcript are corrected by the replacement map."""
+    monkeypatch.setattr(config, "voice_stt_provider", "local")
+    monkeypatch.setattr(config, "voice_stt_replacements",
+                        '{"Conulec": "comulytic", "Kamilik": "comulytic"}')
+    # Reset the module-level cache so the new config string is parsed.
+    voice_mod._REPLACEMENTS_RAW = ""
+    voice_mod._REPLACEMENTS_MAP = {}
+
+    async def _fake_local(_bytes):
+        return "I use Conulec and Kamilik every day"
+    monkeypatch.setattr(voice_mod, "_transcribe_local", _fake_local)
+
+    result = await voice_mod.transcribe_audio(b"x")
+    assert result == "I use comulytic and comulytic every day"
+
+
+async def test_transcribe_audio_empty_replacements_is_noop(monkeypatch):
+    """Empty voice_stt_replacements = the transcript is returned unchanged."""
+    monkeypatch.setattr(config, "voice_stt_provider", "local")
+    monkeypatch.setattr(config, "voice_stt_replacements", "")
+    voice_mod._REPLACEMENTS_RAW = ""
+    voice_mod._REPLACEMENTS_MAP = {}
+
+    async def _fake_local(_bytes):
+        return "I use Conulec and Kamilik"
+    monkeypatch.setattr(voice_mod, "_transcribe_local", _fake_local)
+
+    result = await voice_mod.transcribe_audio(b"x")
+    assert result == "I use Conulec and Kamilik"
+
+
+async def test_transcribe_audio_malformed_replacements_is_noop(monkeypatch, caplog):
+    """Malformed JSON logs a WARNING and returns the text unchanged (no raise)."""
+    monkeypatch.setattr(config, "voice_stt_provider", "local")
+    monkeypatch.setattr(config, "voice_stt_replacements", "not valid json {")
+    voice_mod._REPLACEMENTS_RAW = ""
+    voice_mod._REPLACEMENTS_MAP = {}
+
+    async def _fake_local(_bytes):
+        return "I use Conulec"
+    monkeypatch.setattr(voice_mod, "_transcribe_local", _fake_local)
+
+    import logging
+    with caplog.at_level(logging.WARNING, logger="bot.voice"):
+        result = await voice_mod.transcribe_audio(b"x")
+    assert result == "I use Conulec"
+    assert any("malformed JSON" in rec.message for rec in caplog.records)
 
 
 # ---------------------------------------------------------------------------

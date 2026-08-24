@@ -28,8 +28,10 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import logging
 import os
+import re
 import sys
 import tempfile
 import time
@@ -49,6 +51,67 @@ _log = logging.getLogger("bot.voice")
 # Module-level singleton for the local Whisper model — the multi-second load
 # happens once per process. None until first use.
 _LOCAL_WHISPER_MODEL = None
+
+# --- STT domain-word replacement cache --------------------------------------
+# `_apply_replacements` parses `config.voice_stt_replacements` (a JSON
+# string) into a dict the first time it's called and re-parses only if the
+# raw string changes. `config` is a singleton mutated in place, so we key the
+# cache on the raw string; a mismatch triggers a re-parse. Caching avoids
+# re-running `json.loads` + `re.compile` on every transcription call.
+_REPLACEMENTS_RAW: str = ""
+_REPLACEMENTS_MAP: dict[str, str] = {}
+
+
+def _apply_replacements(text: str) -> str:
+    """Apply the user-configured STT mishearing → correction map to `text`.
+
+    `config.voice_stt_replacements` is a JSON object mapping known
+    mishearings to corrections (e.g. ``{"Conulec": "comulytic"}``). Each key
+    is replaced as a case-insensitive whole word. Empty / unset config =
+    no-op (returns `text` unchanged). Malformed JSON logs a WARNING and
+    returns `text` unchanged — STT must never block on a bad config.
+
+    The parsed map is cached at module level and re-parsed only when the
+    raw config string changes (see `_REPLACEMENTS_RAW`).
+    """
+    global _REPLACEMENTS_RAW, _REPLACEMENTS_MAP
+    raw = config.voice_stt_replacements
+    if not raw:
+        return text
+    if raw != _REPLACEMENTS_RAW:
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as e:
+            _log.warning(
+                "voice_stt_replacements is malformed JSON (%s); "
+                "skipping replacement pass",
+                e,
+            )
+            _REPLACEMENTS_RAW = raw
+            _REPLACEMENTS_MAP = {}
+            return text
+        if not isinstance(parsed, dict):
+            _log.warning(
+                "voice_stt_replacements JSON must be an object "
+                "(got %s); skipping replacement pass",
+                type(parsed).__name__,
+            )
+            _REPLACEMENTS_RAW = raw
+            _REPLACEMENTS_MAP = {}
+            return text
+        _REPLACEMENTS_RAW = raw
+        _REPLACEMENTS_MAP = {str(k): str(v) for k, v in parsed.items()}
+    if not _REPLACEMENTS_MAP:
+        return text
+    out = text
+    for mishearing, correction in _REPLACEMENTS_MAP.items():
+        out = re.sub(
+            r"\b" + re.escape(mishearing) + r"\b",
+            correction,
+            out,
+            flags=re.IGNORECASE,
+        )
+    return out
 
 
 class SilenceDetectSink(WaveSink):
@@ -204,27 +267,39 @@ async def transcribe_audio(audio_bytes: bytes) -> str:
       - ``"auto"``: try local first, fall back to cloud on any error.
 
     Returns the transcribed text (empty string if transcription yields nothing).
+
+    The returned text is passed through `_apply_replacements` (the
+    user-configured mishearing → correction map) before returning, so every
+    provider path inherits the same domain-word correction pass.
     """
     provider = config.voice_stt_provider
     if provider == "local":
-        return await _transcribe_local(audio_bytes)
-    if provider == "openai":
-        return await _transcribe_cloud(audio_bytes)
-    # auto
-    try:
-        return await _transcribe_local(audio_bytes)
-    except Exception as e:  # noqa: BLE001 — auto falls back on any error
-        _log.warning("local STT failed (%r); falling back to cloud", e)
-        return await _transcribe_cloud(audio_bytes)
+        raw = await _transcribe_local(audio_bytes)
+    elif provider == "openai":
+        raw = await _transcribe_cloud(audio_bytes)
+    else:  # auto
+        try:
+            raw = await _transcribe_local(audio_bytes)
+        except Exception as e:  # noqa: BLE001 — auto falls back on any error
+            _log.warning("local STT failed (%r); falling back to cloud", e)
+            raw = await _transcribe_cloud(audio_bytes)
+    return _apply_replacements(raw)
 
 
 async def _transcribe_cloud(audio_bytes: bytes) -> str:
-    """Cloud Whisper API transcription."""
+    """Cloud Whisper API transcription.
+
+    Forwards `config.voice_stt_prompt` as the API `prompt=` (up to 224
+    tokens of decoder-context bias) when non-empty; `None` = no prompt
+    (the API default).
+    """
     client = _openai_client()
     buf = io.BytesIO(audio_bytes)
     buf.name = "audio.wav"
     resp = await client.audio.transcriptions.create(
-        model=config.voice_stt_model, file=buf
+        model=config.voice_stt_model,
+        file=buf,
+        prompt=(config.voice_stt_prompt or None),
     )
     return (getattr(resp, "text", "") or "").strip()
 
@@ -233,25 +308,45 @@ async def _transcribe_local(audio_bytes: bytes) -> str:
     """Local in-process faster-whisper transcription (run in a thread to avoid blocking).
 
     faster-whisper's `model.transcribe()` returns `(segments, info)` where
-    `segments` is an iterable of objects with `.text` attributes. We join them
-    with spaces. Like openai-whisper, it reads from a file path, not bytes —
-    write a temp WAV first.
+    `segments` is a *lazy* iterable of objects with `.text` attributes. The
+    CTranslate2 inference does not run until the generator is iterated, so
+    BOTH the `transcribe()` call AND the join/materialization must run inside
+    the worker thread — iterating the generator on the event loop thread
+    re-introduces the blocking the `asyncio.to_thread` wrapper was meant to
+    avoid (this was the root cause of the Discord gateway "heartbeat blocked
+    for more than N seconds" warnings on Fly.io during Comulytic-bridge
+    transcriptions). Like openai-whisper, faster-whisper reads from a file
+    path, not bytes — write a temp WAV first.
     """
     model = await asyncio.to_thread(_get_local_whisper)
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
         tmp.write(audio_bytes)
         tmp_path = tmp.name
     try:
-        segments, _info = await asyncio.to_thread(
-            model.transcribe, tmp_path, language="en"
-        )
-        # faster-whisper's segments is a generator — materialize + join.
-        return " ".join(seg.text for seg in segments).strip()
+        return await asyncio.to_thread(_transcribe_local_sync, model, tmp_path)
     finally:
         try:
             os.unlink(tmp_path)
         except OSError:
             pass
+
+
+def _transcribe_local_sync(model: "WhisperModel", path: str) -> str:
+    """Synchronous helper: run transcribe() + iterate the lazy generator + join.
+
+    Runs entirely on a worker thread via `asyncio.to_thread` (called from
+    `_transcribe_local`). Materializing `segments` here (not on the event
+    loop) is what keeps the Whisper inference off the event loop — the
+    generator is lazy, so the expensive `self.model.generate(...)` call only
+    fires when we iterate it in the `" ".join(...)` below.
+    """
+    segments, _info = model.transcribe(
+        path,
+        language="en",
+        initial_prompt=(config.voice_stt_prompt or None),
+        hotwords=(config.voice_stt_hotwords or None),
+    )
+    return " ".join(seg.text for seg in segments).strip()
 
 
 async def synthesize_speech(text: str) -> bytes:

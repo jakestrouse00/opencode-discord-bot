@@ -163,6 +163,27 @@ class BotConfig(BaseSettings):
     # (GPU mixed), etc. `int8` is the CPU default.
     whisper_compute_type: str = "int8"
 
+    # --- STT domain-word biasing (optional, all default empty = no change) ---
+    # Space-separated domain words whose generation probability is boosted by
+    # the faster-whisper CTranslate2 decoder (local + auto paths only; the
+    # cloud OpenAI Whisper API has no equivalent). Purpose-built for rare /
+    # out-of-vocabulary words the model mishears (e.g. "comulytic" →
+    # "Conulec" / "Kamilik"). Empty = no bias (current behavior).
+    voice_stt_hotwords: str = ""
+    # Short context sentence passed as decoder prefix context. Used by BOTH
+    # the local path (faster-whisper `initial_prompt=`) and the cloud path
+    # (OpenAI `prompt=`, up to 224 tokens). Best as a natural sentence
+    # containing the domain words, e.g. "The user discusses Comulytic,
+    # opencode, and Pycord." Empty = no prompt (current behavior).
+    voice_stt_prompt: str = ""
+    # JSON object mapping known mishearings to corrections, applied as a
+    # case-insensitive whole-word replace on the final transcript (both
+    # local and cloud paths). 100% reliable for enumerated mishearings; runs
+    # once on the final string (no inference cost). e.g.
+    # '{"Conulec":"comulytic","Kamilik":"comulytic"}'. Malformed JSON = logged
+    # WARNING + no-op (STT never blocks on a bad config). Empty = no-op.
+    voice_stt_replacements: str = ""
+
     # --- speaker identification (diarization, optional) ---
     # Speaker ID adds per-speaker labels to multi-speaker recordings
     # (meetings, not just solo notes) so the oc-assistant agent can produce
