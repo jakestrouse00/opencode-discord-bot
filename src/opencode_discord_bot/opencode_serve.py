@@ -2,7 +2,7 @@
 Discord control bot.
 
 The bot talks to an `opencode serve` HTTP server (default
-`http://127.0.0.1:4096`, see `config.opencode_server_url`). Previously the
+`http://127.0.0.1:4097`, see `config.opencode_server_url`). Previously the
 user had to start that server separately. This module lets the bot spawn it
 as a child process on login (`OpencodeBot.on_connect`) and tear it down when
 the bot closes (`OpencodeBot.close`).
@@ -32,6 +32,7 @@ lightweight-import convention. It is a standalone copy of
 from __future__ import annotations
 
 import base64
+import json
 import os
 import shutil
 import signal
@@ -380,12 +381,36 @@ class OpencodeServe:
             "Basic " + base64.b64encode(f"opencode:{self._password}".encode()).decode()
         )
 
+    @staticmethod
+    def _is_opencode_health_response(r) -> bool:
+        """True if `r` is a 200 + opencode-shaped JSON health body.
+
+        opencode's ``GET /global/health`` returns a JSON object containing
+        at least a ``healthy`` (and usually ``version``) key. Validating the
+        body — not just the status code — is load-bearing: when the
+        `opencode-remote-gui` (Flet/FastAPI) co-hosts on the same port it
+        serves a 200 + HTML catch-all on every path, including
+        ``/global/health``. A status-only check false-positives on the GUI's
+        HTML and makes the bot "reuse" the GUI as opencode serve, after
+        which every API call (``POST /session``, etc.) 405s. The JSON parse
+        + key check rejects HTML / non-JSON / wrong-shape responses so the
+        bot falls through to spawning the real server instead.
+        """
+        try:
+            if r.status != 200:
+                return False
+            body = json.loads(r.read(2048))
+        except (ValueError, OSError):
+            return False
+        return isinstance(body, dict) and ("healthy" in body or "version" in body)
+
     def _probe_healthy(self) -> bool:
-        """One-shot authed GET /global/health. True if 200, False otherwise.
+        """One-shot authed GET /global/health. True if 200 + opencode body.
 
         Used as a pre-flight to detect an already-running server at the target
         URL so we reuse it instead of spawning a duplicate that can't bind.
-        Never raises.
+        Validates the response body is opencode's JSON health shape (not just
+        a 200) — see ``_is_opencode_health_response`` for why. Never raises.
         """
         try:
             req = urllib.request.Request(
@@ -393,17 +418,19 @@ class OpencodeServe:
                 headers={"Authorization": self._auth_header()},
             )
             with urllib.request.urlopen(req, timeout=2.0) as r:
-                return r.status == 200
+                return self._is_opencode_health_response(r)
         except Exception:  # noqa: BLE001 — probe must never raise
             return False
 
     def _wait_healthy(self, timeout: float) -> bool:
-        """Poll GET /global/health until 200 or timeout. Never raises.
+        """Poll GET /global/health until 200 + opencode body or timeout.
 
-        Sends basic auth (opencode:<password>) because `opencode serve` returns
-        401 on every endpoint when OPENCODE_SERVER_PASSWORD is set — a 401 means
-        the server IS listening, but we keep polling for the authed 200 to
-        confirm it's fully ready and the password is correct.
+        Sends basic auth (opencode:<password>) because `opencode serve`
+        returns 401 on every endpoint when OPENCODE_SERVER_PASSWORD is set —
+        a 401 means the server IS listening, but we keep polling for the
+        authed 200 + opencode-shaped body to confirm it's fully ready, the
+        password is correct, AND it's actually opencode (not the Flet GUI
+        co-hosted on the same port returning 200 + HTML).
         """
         deadline = time.monotonic() + max(0.0, timeout)
         url = f"{self.url}/global/health"
@@ -420,7 +447,7 @@ class OpencodeServe:
                     url, headers={"Authorization": auth_header}
                 )
                 with urllib.request.urlopen(req, timeout=1.0) as r:
-                    if r.status == 200:
+                    if self._is_opencode_health_response(r):
                         return True
             except urllib.error.HTTPError as e:
                 # 401 = server is up but auth failed (wrong password). Keep

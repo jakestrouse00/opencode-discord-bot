@@ -12,7 +12,7 @@ a convenience for ad-hoc runs):
 
 Run from the repo root in a separate terminal from `python main.py`:
     python -m opencode_discord_bot
-    python -m opencode_discord_bot --guild 123456789 --server http://127.0.0.1:4096
+    python -m opencode_discord_bot --guild 123456789 --server http://127.0.0.1:4097
     python -m opencode_discord_bot.bot_start
 
 Do NOT run without a token — it exits(1) cleanly with a clear message.

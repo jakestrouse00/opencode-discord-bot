@@ -65,7 +65,13 @@ class BotConfig(BaseSettings):
     discord_bot_session_category_id: int = 0
 
     # --- opencode serve lifecycle ---
-    opencode_server_url: str = "http://127.0.0.1:4096"
+    # Default port 4097 (NOT 4096 — 4096 is now the `opencode-remote-gui`
+    # Flet UI port, so http://127.0.0.1:4096 shows the GUI instead of the
+    # opencode serve basic-auth dialog). The spawned `opencode serve`
+    # subprocess listens on 4097; the GUI's backend talks to it on this URL.
+    # Mirrors `opencode-rest-client`'s `config.py` defaults. If a stale `.env`
+    # pins 4096, update it to 4097 (the env override wins over this default).
+    opencode_server_url: str = "http://127.0.0.1:4097"
     opencode_server_password: str = ""
     # Basic-auth username sent to the opencode server (the server always
     # expects "opencode"; exposed for non-default server configs and to keep
@@ -74,7 +80,11 @@ class BotConfig(BaseSettings):
     # `opencode_server_password` is set.
     opencode_server_username: str = "opencode"
     opencode_serve_enabled: bool = True
-    opencode_serve_port: int = 4096
+    # The port the spawned `opencode serve` listens on. Default 4097 (the
+    # `opencode-remote-gui` backend takes 4096 so the user opens
+    # http://127.0.0.1:4096 in the browser and sees the GUI, not the
+    # opencode serve API). Keep in sync with `opencode_server_url` above.
+    opencode_serve_port: int = 4097
     opencode_serve_hostname: str = "127.0.0.1"
     opencode_serve_cors: list[str] = Field(default_factory=list)
     opencode_serve_startup_timeout: float = 30.0

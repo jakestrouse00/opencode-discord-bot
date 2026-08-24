@@ -20,6 +20,12 @@ def test_defaults_all_safe():
     assert fields["comulytic_jwt"].default == ""
     assert fields["voice_stt_provider"].default == "local"
     assert fields["voice_message_enabled"].default is True
+    # Port default is 4097 (NOT 4096 — 4096 is the opencode-remote-gui Flet
+    # UI port; pointing the bot at 4096 when the GUI is co-hosted makes the
+    # health probe false-positive on the GUI's HTML and every API call 405s).
+    # Pinning the default here catches future drift.
+    assert fields["opencode_server_url"].default == "http://127.0.0.1:4097"
+    assert fields["opencode_serve_port"].default == 4097
 
 
 def test_module_singleton_is_botconfig_instance():
