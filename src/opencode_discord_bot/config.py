@@ -18,7 +18,7 @@ Env-var overrides (uppercase of the field name):
   / OPENCODE_SERVE_ENABLED / OPENCODE_SERVE_PORT / OPENCODE_SERVE_HOSTNAME
   / OPENCODE_SERVE_CORS / OPENCODE_SERVE_STARTUP_TIMEOUT / OPENCODE_SERVE_CWD
   / OC_SINGLETON_LOCK
-  OPENCODE_DEFAULT_MODEL / OPENCODE_PLAN_AUTHOR_MODEL
+  OPENCODE_DEFAULT_MODEL / OPENCODE_ASSISTANT_MODEL
   VOICE_MESSAGE_ENABLED / VOICE_MESSAGE_TRIGGER_CHANNEL_ID
   / VOICE_SILENCE_TIMEOUT_SECONDS / VOICE_CHUNK_SECONDS / VOICE_STT_PROVIDER
   / VOICE_STT_MODEL / VOICE_LOCAL_WHISPER_MODEL / VOICE_TTS_ENABLED
@@ -112,22 +112,22 @@ class BotConfig(BaseSettings):
     # `model:` field on the opencode server side. Empty = each opencode agent's
     # own frontmatter model wins (the historical behavior). Two separate fields
     # so the default agent (`/oc` + plain-text follow-ups, `agent=None`) and
-    # the plan-author agent (`/oc_plan`, `/oc_voice`, `/oc_talk`, voice-message
+    # the oc-assistant agent (`/oc_plan`, `/oc_voice`, `/oc_talk`, voice-message
     # trigger, Comulytic bridge) can target different models independently.
     # Model ids are provider-scoped — e.g. `ollama-cloud/glm-5.2`,
     # `anthropic/claude-sonnet-4`, `openai/gpt-5`. See the opencode server docs
     # for the accepted model id format on your provider.
     opencode_default_model: str = ""
-    opencode_plan_author_model: str = ""
+    opencode_assistant_model: str = ""
 
     # --- voice messages (press-hold mic in the mobile composer) ---
     # When True, the bot transcribes Discord voice-message attachments arriving
-    # as plain messages and routes the transcript to plan-author (follow-up in
+    # as plain messages and routes the transcript to oc-assistant (follow-up in
     # a session channel, or new session in the trigger channel below). Set
     # False to disable voice-message intake without affecting /oc_talk or
     # /oc_voice.
     voice_message_enabled: bool = True
-    # The channel id where voice messages trigger a NEW plan-author session
+    # The channel id where voice messages trigger a NEW oc-assistant session
     # (branch c of on_message). Voice messages in existing session channels
     # still work as follow-ups regardless of this value. 0 = disabled (only
     # follow-ups work). Defaults to #new-plans (1533242090862149842).
@@ -165,7 +165,7 @@ class BotConfig(BaseSettings):
 
     # --- speaker identification (diarization, optional) ---
     # Speaker ID adds per-speaker labels to multi-speaker recordings
-    # (meetings, not just solo notes) so the plan-author agent can produce
+    # (meetings, not just solo notes) so the oc-assistant agent can produce
     # coherent meeting notes. Layered on top of `transcribe_audio` (the
     # anonymous STT primitive stays unchanged); requires the optional
     # `speakers` extra (`pip install 'opencode-discord-bot[speakers]'`) and
@@ -216,7 +216,7 @@ class BotConfig(BaseSettings):
     # `comulytic-bridge` console script) refuses to start, so the feature is
     # fully OFF by default. Flip to True via the `.env` file or env var:
     #   COMULYTIC_ENABLED=true
-    # to activate polling + plan-author routing. When False, the bridge
+    # to activate polling + oc-assistant routing. When False, the bridge
     # exits immediately at startup with a clear message (see `bridge.main`).
     # Even when this is True, the bridge still requires `comulytic_jwt` to
     # be set — if the JWT is empty it exits with a different clear message.
@@ -260,7 +260,7 @@ class BotConfig(BaseSettings):
     # derives a stable desktop Chrome UA at startup. Must match the UA used
     # during JWT capture to minimize fingerprint mismatch.
     comulytic_user_agent: str = ""
-    # Directive sent to plan-author: "" (let plan-author classify) |
+    # Directive sent to oc-assistant: "" (let oc-assistant classify) |
     # "actionable" | "note". Mirrors the [PLAN_TYPE_PRESELECTED] directive
     # from opencode_discord_bot/commands.py.
     comulytic_plan_type: str = ""
@@ -275,18 +275,18 @@ class BotConfig(BaseSettings):
 
     # --- Comulytic bridge -> Discord channel (mirrors /oc_talk) ---
     # When non-zero, the bridge posts a "Created #channel" pointer to this
-    # channel id when it routes a new recording to plan-author (mirrors
+    # channel id when it routes a new recording to oc-assistant (mirrors
     # /oc_talk's ctx.followup.send pointer). 0 = no pointer; the created
     # channel is the sole discoverability surface. Useful when you want a
     # single "firehose" channel to watch for new bridge activity.
     comulytic_discord_pointer_channel_id: int = 0
     # How long (seconds) to wait for the user's plain-text reply to a
-    # plan-author clarifying question in the bridge's Discord channel before
+    # oc-assistant clarifying question in the bridge's Discord channel before
     # rejecting it (unblocking the agent). The main bot uses buttons that
     # wait indefinitely; plain-text polling needs a ceiling. 300s = 5 min.
     comulytic_question_timeout_seconds: float = 300.0
     # How often (seconds) to poll GET /question + GET /permission while the
-    # plan-author session is running. Matches the main bot's 2.0s cadence.
+    # oc-assistant session is running. Matches the main bot's 2.0s cadence.
     comulytic_question_poll_interval_seconds: float = 2.0
 
     # --- Comulytic bridge: max-recording-duration cap ---

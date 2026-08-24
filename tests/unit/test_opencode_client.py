@@ -32,10 +32,10 @@ def test_resolve_model_default_returns_config_value(monkeypatch):
     assert c._resolve_model(None) == "ollama-cloud/glm-5.2"
 
 
-def test_resolve_model_plan_author_returns_plan_value(monkeypatch):
-    monkeypatch.setattr(config, "opencode_plan_author_model", "anthropic/claude-sonnet-4")
+def test_resolve_model_assistant_returns_value(monkeypatch):
+    monkeypatch.setattr(config, "opencode_assistant_model", "anthropic/claude-sonnet-4")
     c = OpencodeClient()
-    assert c._resolve_model("plan-author") == "anthropic/claude-sonnet-4"
+    assert c._resolve_model("oc-assistant") == "anthropic/claude-sonnet-4"
 
 
 def test_model_ref_none_for_empty():
@@ -79,8 +79,8 @@ async def test_send_prompt_async_returns_none_on_204(monkeypatch):
         await c.aclose()
 
 
-async def test_send_prompt_async_with_plan_author_includes_model(monkeypatch):
-    monkeypatch.setattr(config, "opencode_plan_author_model", "anthropic/claude-sonnet-4")
+async def test_send_prompt_async_with_assistant_includes_model(monkeypatch):
+    monkeypatch.setattr(config, "opencode_assistant_model", "anthropic/claude-sonnet-4")
     captured = {}
 
     def handler(request):
@@ -91,8 +91,8 @@ async def test_send_prompt_async_with_plan_author_includes_model(monkeypatch):
     transport = httpx.MockTransport(handler)
     c = _client_with(transport, monkeypatch)
     try:
-        await c.send_prompt_async("sid-1", [{"type": "text", "text": "x"}], agent="plan-author")
-        assert captured["body"]["agent"] == "plan-author"
+        await c.send_prompt_async("sid-1", [{"type": "text", "text": "x"}], agent="oc-assistant")
+        assert captured["body"]["agent"] == "oc-assistant"
         assert captured["body"]["model"] == {"providerID": "anthropic", "modelID": "claude-sonnet-4"}
     finally:
         await c.aclose()

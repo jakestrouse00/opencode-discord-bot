@@ -68,7 +68,7 @@ async def test_chain_text_followup_drives_session(
 async def test_chain_text_followup_with_question_answered_via_button(
     bot_instance, followup_config, monkeypatch
 ):
-    """Text follow-up where plan-author asks a question; user answers via button."""
+    """Text follow-up where oc-assistant asks a question; user answers via button."""
     sid = "sid-q"
     ch = FakeChannel(id=555, name="q-session", guild=FakeGuild())
     await bot_instance.router.bind(555, sid)

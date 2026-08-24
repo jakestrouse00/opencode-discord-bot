@@ -16,18 +16,18 @@ control bot.
 - **Configure:** set `DISCORD_BOT_TOKEN` (required) +
   `OPENCODE_SERVER_PASSWORD` (required) + optional `OPENAI_API_KEY` (TTS +
   cloud STT fallback) + optional `OLLAMA_AUTH_KEY` (LLM channel-name slugs) +
-  optional `OPENCODE_DEFAULT_MODEL` / `OPENCODE_PLAN_AUTHOR_MODEL` (override
+  optional `OPENCODE_DEFAULT_MODEL` / `OPENCODE_ASSISTANT_MODEL` (override
   the opencode model for `/oc`/follow-ups vs `/oc_plan`/`/oc_voice`/`/oc_talk`/
   bridge) via env vars or a `.env` file in the run directory. See `.env.example`
   for the full list.
-- **Install the `plan-author` agent:** the bot's `/oc_plan`, `/oc_voice`,
+- **Install the `oc-assistant (Bobby)` agent:** the bot's `/oc_plan`, `/oc_voice`,
   `/oc_talk`, voice-message trigger, and Comulytic-bridge paths route to
-  opencode's `plan-author` agent, which is **not** built into opencode — it
-  lives in the target project's `.opencode/agent/plan-author.md`. This package
+  opencode's `oc-assistant (Bobby)` agent, which is **not** built into opencode — it
+  lives in the target project's `.opencode/agent/oc-assistant.md`. This package
   ships a generic, self-contained copy. Run
   `python -m opencode_discord_bot.install_agent` (from the target project's
   root, or `--dest <project root>`) to install it. See `SETUP_GUIDE.md`
-  "Install the plan-author agent" for details.
+  "Install the oc-assistant (Bobby) agent" for details.
 - **Do NOT run the bot from agent context.** `python -m opencode_discord_bot`
   (or `opencode-discord-bot`) starts the Discord gateway AND auto-spawns
   `opencode serve` as a child process (unless `OPENCODE_SERVE_ENABLED=false`).
@@ -136,7 +136,7 @@ live at the repo root: `Dockerfile`, `fly.toml`, `fly.env.example`,
   `sed -i '/^force-include = /d' /src/pyproject.toml` because newer
   hatchling already includes non-`.py` files from `packages`, so the
   `force-include` line in `pyproject.toml` duplicates
-  `agent/plan-author.md` and the wheel build fails with "A second file is
+  `agent/oc-assistant.md` and the wheel build fails with "A second file is
   being added to the wheel archive at the same path". The `.md` agent file
   is still shipped (it's under `src/opencode_discord_bot/agent/` which is in
   `packages`). Do NOT remove the `sed` without also removing the
@@ -165,7 +165,7 @@ live at the repo root: `Dockerfile`, `fly.toml`, `fly.env.example`,
   `opencode serve` on Fly (`OPENCODE_SERVE_ENABLED=false`), so the serve
   CWD is irrelevant to the container. The desktop `opencode serve` the bot
   talks to runs in the user's project directory on their desktop (where
-  `.opencode/` lives); the bundled `plan-author` agent must be installed
+  `.opencode/` lives); the bundled `oc-assistant (Bobby)` agent must be installed
   there (`python -m opencode_discord_bot.install_agent --dest <desktop
   project root>`), not in the container.
 
@@ -220,21 +220,26 @@ live at the repo root: `Dockerfile`, `fly.toml`, `fly.env.example`,
   via `OPENCODE_SERVER_PASSWORD` env var. **Model overrides:**
   `send_prompt_async` / `send_message` resolve the model id from
   `config.opencode_default_model` (for `agent=None` — `/oc` + plain-text
-  follow-ups) or `config.opencode_plan_author_model` (for `agent="plan-author"`
+  follow-ups) or `config.OPENCODE_ASSISTANT_MODEL` (for `agent="oc-assistant"`
   — `/oc_plan`, `/oc_voice`, `/oc_talk`, voice-message trigger, Comulytic
   bridge) via `_resolve_model`, and include it in the POST body only when
   non-empty. Both empty (the default) = each opencode agent's own frontmatter
   `model:` field wins (the historical behavior). No call site passes `model`
   explicitly — the override flows through transparently.
-- **Bundled `plan-author` agent** (`opencode_discord_bot/agent/plan-author.md`)
-  — a fully generic, self-contained Plan Author subagent shipped inside the
-  package. The bot routes plan-author prompts to opencode's `plan-author`
-  agent, which the target project must have installed at
-  `.opencode/agent/plan-author.md`. The bundled copy is project-agnostic (it
-  reads the target project's own `AGENTS.md` if present, writes only to
-  `.opencode/plans/`, and is compatible with the `change-outline` skill if
-  that's installed). Install it via `python -m opencode_discord_bot.install_agent`
-  (see `install_agent.py`). Shipped in the wheel via hatchling `force-include`.
+- **Bundled `oc-assistant` agent (Bobby)** (`opencode_discord_bot/agent/oc-assistant.md`)
+  — a fully generic, self-contained assistant subagent ("Bobby") shipped
+  inside the package. The bot routes `oc-assistant` prompts to opencode's
+  `oc-assistant` agent, which the target project must have installed at
+  `.opencode/agent/oc-assistant.md`. The bundled copy is project-agnostic
+  (it reads the target project's own `AGENTS.md` if present, writes only
+  under `.opencode/assistant/{plans,notes,thoughts}/`, and defaults to the
+  **thought** type when no type signal is present). Bobby's artifacts live
+  under `.opencode/assistant/` and are intentionally NOT visible to the
+  root toolkit's `plan-dashboard` / `plan-triage` / `change-outline` (which
+  read `.opencode/plans/`) — the user doesn't want other opencode sessions
+  routing to this agent, so cross-visibility is dropped by design. Install
+  it via `python -m opencode_discord_bot.install_agent` (see
+  `install_agent.py`). Shipped in the wheel via hatchling `force-include`.
 - **`OpencodeServe`** (`opencode_serve.py`) — lifecycle manager for the
   `opencode serve` subprocess. `OpencodeBot.on_connect` spawns it on login
   (guarded by `_serve_started` so reconnects don't re-spawn);
@@ -314,16 +319,16 @@ live at the repo root: `Dockerfile`, `fly.toml`, `fly.env.example`,
   `_run_voice_followup`; (b) text in a session channel → existing text
   follow-up path (unchanged); (c) a voice message in the trigger channel
   (`voice_message_trigger_channel_id`, default `#new-plans` / channel id
-  `1533242090862149842`) → new plan-author session via
+  `1533242090862149842`) → new oc-assistant (Bobby) session via
   `_run_talk_from_message`; (d) else ignored. Gated by `voice_message_enabled`
   (config, default True). No `plan_type` directive is sent for voice-message
-  new sessions (no slash-option UI) — the `plan-author` agent classifies from
+  new sessions (no slash-option UI) — the `oc-assistant (Bobby)` agent classifies from
   the transcript. No new deps; reuses the `/oc_talk` pipeline verbatim. Does
   NOT touch `/oc_voice` or the DAVE-broken sinks path.
 - **Speaker identification** (`speakers.py`): layers per-speaker labels on
   top of the anonymous STT path so multi-speaker recordings (meetings, not
   just solo notes) produce a diarized, speaker-labeled transcript that
-  plan-author can turn into coherent meeting notes. Three public functions:
+  oc-assistant (Bobby) can turn into coherent meeting notes. Three public functions:
   `load_speakers()` (reads reference embeddings from `Speakers/<name>/`
   subfolders), `identify_speakers()` (diarize + cosine-match each turn
   against reference embeddings + label unknowns `Speaker N`; unwraps the
@@ -382,12 +387,12 @@ live at the repo root: `Dockerfile`, `fly.toml`, `fly.env.example`,
   request as Discord buttons / select menus, and POSTs the user's choice back
   to the matching REST endpoint so the deferred resolves and the agent turn
   resumes.
-- **Comulytic bridge → Discord channel** (`bridge.py:route_to_plan_author` +
+- **Comulytic bridge → Discord channel** (`bridge.py:route_to_assistant` +
   `discord_rest.py` + `bridge_questions.py` + `text_utils.py`): when
   `discord_bot_token` + `discord_bot_guild_id` are set, the bridge creates a
   Discord text channel for each routed Comulytic recording (mirrors
   `/oc_talk`), posts the transcript, fires an LLM slug rename, sends to
-  `plan-author`, surfaces clarifying questions as plain-text prompts (polling
+  `oc-assistant (Bobby)`, surfaces clarifying questions as plain-text prompts (polling
   `GET /channels/{id}/messages` for the user's reply via the REST-based
   `poll_pending_requests_rest`), and posts the final response. Uses **raw
   Discord REST via `DiscordRest`** (no Pycord, no gateway — safe to run
@@ -400,7 +405,7 @@ live at the repo root: `Dockerfile`, `fly.toml`, `fly.env.example`,
   bridge remains the sole WRITER. `text_utils.py` is the Pycord-free shared module for
   `_split_message`/`_extract_text`/`_final_assistant_text`/`_slugify_prompt`
   (imported by both `commands.py` and `bridge.py`). When Discord isn't
-  configured, `route_to_plan_author` falls back to log-only.
+  configured, `route_to_assistant` falls back to log-only.
 - **Comulytic bridge auto-spawn:** `OpencodeBot.on_connect` spawns the bridge
   as an in-process `asyncio.create_task` (calling `run_bridge()` directly, NOT
   `main()` — `main()` would create a second event loop + reconfigure root
@@ -484,7 +489,7 @@ live at the repo root: `Dockerfile`, `fly.toml`, `fly.env.example`,
   `OPENCODE_SERVE_ENABLED` / `OPENCODE_SERVE_PORT` / `OPENCODE_SERVE_HOSTNAME` / `OPENCODE_SERVE_CORS`
   (JSON list)   / `OPENCODE_SERVE_STARTUP_TIMEOUT` / `OPENCODE_SERVE_CWD` /
   `OC_SINGLETON_LOCK` /
-  `OPENCODE_DEFAULT_MODEL` / `OPENCODE_PLAN_AUTHOR_MODEL` /
+  `OPENCODE_DEFAULT_MODEL` / `OPENCODE_ASSISTANT_MODEL` /
   `VOICE_MESSAGE_ENABLED` / `VOICE_MESSAGE_TRIGGER_CHANNEL_ID` /
   `VOICE_SILENCE_TIMEOUT_SECONDS` / `VOICE_CHUNK_SECONDS` /
   `VOICE_STT_PROVIDER` / `VOICE_STT_MODEL` / `VOICE_LOCAL_WHISPER_MODEL` /

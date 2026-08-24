@@ -512,7 +512,7 @@ async def poll_pending_requests_rest(
 
     REST-based equivalent of ``questions.py:poll_pending_requests``. Runs
     concurrently with ``poll_until_idle`` inside the bridge's
-    ``route_to_plan_author``. Each iteration fetches both lists, filters to
+    ``route_to_assistant``. Each iteration fetches both lists, filters to
     entries whose ``sessionID`` matches ``session_id``, and renders any
     request not already in ``seen`` as a plain-text message in
     ``channel_id`` (via ``rest.create_message``). Then waits for the user's

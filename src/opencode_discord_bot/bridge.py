@@ -1,11 +1,11 @@
 """Comulytic bridge — poll Comulytic's cloud API for new recordings and route
-their transcripts to opencode's `plan-author` agent.
+their transcripts to opencode's `oc-assistant` agent.
 
 Entry point: ``python -m opencode_discord_bot.bridge`` (or the
 ``comulytic-bridge`` console script). The bridge is a long-running asyncio
 loop, NOT an HTTP server — it polls Comulytic's cloud API directly and uses
 the existing `opencode serve` REST surface (via `OpencodeClient`) to drive
-`plan-author`.
+`oc-assistant`.
 
 Happy path (local Whisper only — Comulytic's cloud ASR is NOT used):
   1. Poll `/note/paging` (cheap `pageSize:1` change-detect; full enumerate
@@ -18,17 +18,17 @@ Happy path (local Whisper only — Comulytic's cloud ASR is NOT used):
      CTranslate2, in-process; `"openai"` = cloud Whisper API; `"auto"` =
      local first, cloud fallback). By default transcription is fully local,
      private, and consistent with `/oc_talk`.
-  3. Route the transcript to `plan-author` via `send_prompt_async`.
+  3. Route the transcript to `oc-assistant` via `send_prompt_async`.
 
 Discord surface (mirrors `/oc_talk`): when `discord_bot_token` +
 `discord_bot_guild_id` are set, the bridge creates a Discord text channel
 under `discord_bot_session_category_id`, posts the transcript there, fires
-an LLM slug rename, sends the prompt to plan-author, surfaces any
+an LLM slug rename, sends the prompt to oc-assistant, surfaces any
 clarifying questions as plain-text prompts in the channel (polling for the
 user's reply), and posts the final response. Uses raw Discord REST via
 ``DiscordRest`` (no Pycord, no gateway connection — safe to run alongside
 the main bot, which owns the gateway session). When Discord isn't
-configured, falls back to log-only (route to plan-author, LOG the response).
+configured, falls back to log-only (route to oc-assistant, LOG the response).
 
 `voice.py` (imported for every recording) pulls Pycord in at module top —
 when the bridge runs in-process with the bot (the auto-spawn path) Pycord is
@@ -74,6 +74,7 @@ from opencode_discord_bot.session_router import SessionRouter
 from opencode_discord_bot.slug import aclose_slug_client, generate_slug
 from opencode_discord_bot.text_utils import (
     _final_assistant_text,
+    _looks_like_prompt,
     _slugify_prompt,
     _split_message,
 )
@@ -85,9 +86,9 @@ _log = logging.getLogger("comulytic.bridge")
 # backlog flood on first run is avoided.
 _BOOTSTRAP_KEY = "__bootstrapped__"
 
-# How long to wait for the plan-author session to finish (poll_until_idle
+# How long to wait for the oc-assistant session to finish (poll_until_idle
 # timeout). A long plan can take a while; 10 minutes is the default.
-_PLAN_AUTHOR_TIMEOUT = 600.0
+_ASSISTANT_TIMEOUT = 600.0
 
 # Persistence file for the bridge's SessionRouter (channel id -> opencode
 # session id). SEPARATE from the main bot's `.opencode-discord-bot-sessions.json`
@@ -104,6 +105,16 @@ _BRIDGE_SESSIONS_FILE = ".opencode-discord-bridge-sessions.json"
 # Discord channel (mirrors commands.py:PROGRESS_EDIT_MIN_INTERVAL = 2.0).
 # Discord rate-limits message edits (~5 edits/5s per channel); 2s is safe.
 _PROGRESS_EDIT_MIN_INTERVAL = 2.0
+
+# How many times to re-fetch list_messages when no assistant text is found
+# before giving up, and how long to sleep between attempts. Closes the
+# timing race where poll_until_idle returns "idle" before the assistant
+# message's text part is persisted (the fire-and-forget prompt_async gap
+# that events.py guards against but can't fully close). 3 attempts × 2s is
+# enough for the common "text part lands a second or two after idle" case
+# without blocking the channel for long on a genuinely-text-less turn.
+_FINAL_TEXT_RETRY_ATTEMPTS = 3
+_FINAL_TEXT_RETRY_SLEEP = 2.0
 
 
 # ---------------------------------------------------------------------------
@@ -181,7 +192,7 @@ def main() -> None:
         _log.error(
             "comulytic_enabled is False — the Comulytic bridge is disabled. "
             "Set COMULYTIC_ENABLED=true in your .env (or the env var) to "
-            "activate polling + plan-author routing. Exiting."
+            "activate polling + oc-assistant routing. Exiting."
         )
         return
 
@@ -267,7 +278,7 @@ async def run_bridge() -> None:
 
     # Discord REST client for channel creation + message posting (raw httpx,
     # no Pycord, no gateway — safe to run alongside the main bot). Constructed
-    # unconditionally; `route_to_plan_author` gates on the token being non-empty
+    # unconditionally; `route_to_assistant` gates on the token being non-empty
     # and gracefully degrades to the log-only path if Discord isn't configured.
     rest: DiscordRest | None = None
     if config.discord_bot_token:
@@ -278,14 +289,14 @@ async def run_bridge() -> None:
             rest = None
     else:
         _log.warning(
-            "discord_bot_token is empty — bridge will route to plan-author and "
+            "discord_bot_token is empty — bridge will route to oc-assistant and "
             "LOG the response only (no Discord channel will be created). Set "
             "DISCORD_BOT_TOKEN to enable the /oc_talk-style Discord surface."
         )
 
     # Bridge-owned SessionRouter (separate persistence file from the main bot
     # so the two processes don't clobber each other). Only used when rest is
-    # active; constructed unconditionally so `route_to_plan_author` can decide
+    # active; constructed unconditionally so `route_to_assistant` can decide
     # at call time whether to bind.
     router = SessionRouter(Path(_BRIDGE_SESSIONS_FILE))
 
@@ -295,7 +306,7 @@ async def run_bridge() -> None:
     serve_ok = await asyncio.to_thread(serve.start)
     if not serve_ok:
         _log.warning(
-            "opencode serve did not become healthy — plan-author routing will "
+            "opencode serve did not become healthy — oc-assistant routing will "
             "fail. Is opencode on PATH? (see SETUP_GUIDE.md). Continuing; the "
             "bridge will retry on each poll cycle."
         )
@@ -646,9 +657,9 @@ async def process_new_recording(
         mono 16kHz WAV) → `voice.transcribe_audio` (dispatches on
         `voice_stt_provider`; default `"local"` = faster-whisper, in-process).
         This is the SAME pipeline `/oc_talk` runs on uploaded attachments.
-    (c) Route the transcript to `plan-author` via `route_to_plan_author`.
+    (c) Route the transcript to `oc-assistant` via `route_to_assistant`.
 
-    ``rest`` + ``router`` are passed through to ``route_to_plan_author`` so a
+    ``rest`` + ``router`` are passed through to ``route_to_assistant`` so a
     Discord channel can be created + bound when Discord is configured. Both
     may be None (log-only mode).
     """
@@ -677,7 +688,7 @@ async def _transcribe_and_route(
     rest: DiscordRest | None = None,
     router: SessionRouter | None = None,
 ) -> dict:
-    """Download audio + local Whisper STT, then route the transcript to plan-author.
+    """Download audio + local Whisper STT, then route the transcript to oc-assistant.
 
     The sole transcription path (mirrors `/oc_talk`). Imports
     `voice.transcribe_audio` + `voice.extract_audio_to_wav` (voice.py imports
@@ -778,11 +789,11 @@ async def _transcribe_and_route(
         }
 
     _log.info(
-        "recording %s: transcript ready (%d chars) — routing to plan-author",
+        "recording %s: transcript ready (%d chars) — routing to oc-assistant",
         note_id,
         len(transcript),
     )
-    return await route_to_plan_author(
+    return await route_to_assistant(
         opencode, transcript, note_id, rest=rest, router=router
     )
 
@@ -844,7 +855,7 @@ async def download_audio_smart(
 
 
 # ---------------------------------------------------------------------------
-# plan-author routing
+# oc-assistant routing
 # ---------------------------------------------------------------------------
 
 
@@ -901,7 +912,7 @@ async def _rename_when_slug_ready(
         )
 
 
-async def route_to_plan_author(
+async def route_to_assistant(
     opencode: OpencodeClient,
     transcript: str,
     note_id: str,
@@ -909,7 +920,7 @@ async def route_to_plan_author(
     rest: DiscordRest | None = None,
     router: SessionRouter | None = None,
 ) -> dict:
-    """Route `transcript` to opencode's `plan-author` agent.
+    """Route `transcript` to opencode's `oc-assistant` agent.
 
     Mirrors ``commands.py:_run_talk_session`` (the `/oc_talk` routing
     sequence), using raw Discord REST when ``rest`` is provided (no Pycord,
@@ -927,9 +938,9 @@ async def route_to_plan_author(
       5. Fire-and-forget LLM slug rename (``_rename_when_slug_ready``).
       6. Post a "Working on session…" progress message.
       7. Build the prompt (optionally prepend `[PLAN_TYPE_PRESELECTED]`) and
-         `send_prompt_async(sid, parts, agent="plan-author")`.
+         `send_prompt_async(sid, parts, agent="oc-assistant")`.
       8. Concurrently: `poll_until_idle` (throttled progress-edit on_status)
-         + `poll_pending_requests_rest` (surfaces plan-author clarifying
+         + `poll_pending_requests_rest` (surfaces oc-assistant clarifying
          questions as plain-text prompts in the channel, polls for the
          user's reply, calls reply_question/reject_question).
       9. `list_messages` + `_final_assistant_text`, post the response in
@@ -972,7 +983,7 @@ async def route_to_plan_author(
     if not discord_active:
         _log.info(
             "recording %s: Discord surface not configured (rest=%s, router=%s, "
-            "token=%s, guild_id=%s) — routing to plan-author and LOGGING the "
+            "token=%s, guild_id=%s) — routing to oc-assistant and LOGGING the "
             "response only",
             note_id,
             "on" if rest is not None else "off",
@@ -983,12 +994,12 @@ async def route_to_plan_author(
 
     # Build the prompt with the optional plan-type directive (sent regardless
     # of whether Discord is active).
-    # The [COMULYTIC_BRIDGE] directive is ALWAYS prepended so plan-author
+    # The [COMULYTIC_BRIDGE] directive is ALWAYS prepended so oc-assistant
     # knows this session is on the plain-text-reply path (buttons cannot be
     # used — the bridge doesn't own the gateway connection and so can't
-    # receive component-interaction events). plan-author constrains its
+    # receive component-interaction events). oc-assistant constrains its
     # clarifying-question behavior accordingly (one question per call, not
-    # the 1-3 batch allowed on the button path). See .opencode/agent/plan-author.md
+    # the 1-3 batch allowed on the button path). See .opencode/agent/oc-assistant.md
     # "Comulytic bridge (plain-text replies, no buttons)".
     prompt = transcript
     plan_type = (
@@ -1092,16 +1103,16 @@ async def route_to_plan_author(
                     exc,
                 )
 
-    # --- Send the prompt to plan-author ---
+    # --- Send the prompt to oc-assistant ---
     parts = [{"type": "text", "text": prompt}]
     try:
-        await opencode.send_prompt_async(sid, parts, agent="plan-author")
+        await opencode.send_prompt_async(sid, parts, agent="oc-assistant")
     except OpencodeError as exc:
         _log.error("recording %s: send_prompt_async failed: %s", note_id, exc)
         if discord_active and channel_id is not None and rest is not None:
             try:
                 await rest.create_message(
-                    channel_id, f"Failed to send prompt to plan-author: {exc}"
+                    channel_id, f"Failed to send prompt to oc-assistant: {exc}"
                 )
             except DiscordRestError:
                 pass
@@ -1121,7 +1132,7 @@ async def route_to_plan_author(
     mark_active(sid)
 
     _log.info(
-        "recording %s: prompt sent to plan-author (session=%s, discord=%s) — "
+        "recording %s: prompt sent to oc-assistant (session=%s, discord=%s) — "
         "waiting for completion",
         note_id,
         sid,
@@ -1185,12 +1196,12 @@ async def route_to_plan_author(
     try:
         # --- Poll until idle ---
         try:
-            await poll_until_idle(opencode, sid, _on_status, timeout=_PLAN_AUTHOR_TIMEOUT)
+            await poll_until_idle(opencode, sid, _on_status, timeout=_ASSISTANT_TIMEOUT)
         except asyncio.TimeoutError:
             _log.warning(
-                "recording %s: plan-author timed out after %.0fs — fetching partial output",
+                "recording %s: oc-assistant timed out after %.0fs — fetching partial output",
                 note_id,
-                _PLAN_AUTHOR_TIMEOUT,
+                _ASSISTANT_TIMEOUT,
             )
         except OpencodeError as exc:
             _log.error("recording %s: poll_until_idle failed: %s", note_id, exc)
@@ -1203,34 +1214,68 @@ async def route_to_plan_author(
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 poller.cancel()
 
-        # --- Fetch the final assistant text ---
-        try:
-            messages = await opencode.list_messages(sid)
-        except OpencodeError as exc:
-            _log.error("recording %s: list_messages failed: %s", note_id, exc)
-            return {
-                "note_id": note_id,
-                "transcript": transcript,
-                "session_id": sid,
-                "response": "",
-            }
+        # --- Fetch the final assistant text (with retry for the timing race) ---
+        # poll_until_idle returns "idle" once the session's status map entry
+        # clears, but the assistant message's text part may not be persisted
+        # in list_messages yet (the fire-and-forget prompt_async gap that
+        # events.py guards against but can't fully close). Re-fetch a few
+        # times before concluding the agent emitted no text. Each attempt
+        # catches OpencodeError so a transient list_messages failure doesn't
+        # abort the retry loop (mirrors poll_until_idle's error tolerance).
+        final = ""
+        for attempt in range(_FINAL_TEXT_RETRY_ATTEMPTS):
+            try:
+                messages = await opencode.list_messages(sid)
+            except OpencodeError as exc:
+                _log.warning(
+                    "recording %s: list_messages attempt %d/%d failed: %s",
+                    note_id,
+                    attempt + 1,
+                    _FINAL_TEXT_RETRY_ATTEMPTS,
+                    exc,
+                )
+                messages = None
+            final = _final_assistant_text(messages) if messages else ""
+            if final and not _looks_like_prompt(final):
+                break
+            if attempt < _FINAL_TEXT_RETRY_ATTEMPTS - 1:
+                await asyncio.sleep(_FINAL_TEXT_RETRY_SLEEP)
 
-        final = _final_assistant_text(messages) if messages else ""
+        # Detect a prompt leak (regression guard): if the extracted text
+        # still carries the [DISCORD_BOT]/[COMULYTIC_BRIDGE] directive tags
+        # it's the user prompt, not an agent reply. _final_assistant_text no
+        # longer falls back to non-assistant messages, so this should never
+        # fire — but if a future change re-introduces a fallback, catch it
+        # here instead of posting the transcript as the "response".
+        if final and _looks_like_prompt(final):
+            _log.error(
+                "recording %s: extracted 'final' looks like the user prompt "
+                "(contains directive tags) — suppressing the leak. Session %s "
+                "is idle; the agent may not have emitted a summary text part. "
+                "Check .opencode/assistant/ for the artifact.",
+                note_id,
+                sid,
+            )
+            final = ""
+
         _log.info(
-            "recording %s: plan-author done (session=%s, response_len=%d)",
+            "recording %s: oc-assistant done (session=%s, response_len=%d)",
             note_id,
             sid,
             len(final),
         )
         if final:
-            _log.info("plan-author response for %s:\n%s", note_id, final)
+            _log.info("oc-assistant response for %s:\n%s", note_id, final)
 
         # --- Post the response to the Discord channel ---
         if discord_active and channel_id is not None and rest is not None:
             if not final:
                 try:
                     await rest.create_message(
-                        channel_id, f"Done (no text output). Session `{sid}` is now idle."
+                        channel_id,
+                        f"No agent text output found — the agent may not have "
+                        f"emitted a summary. Session `{sid}` is idle; check "
+                        f"`.opencode/assistant/` for the artifact.",
                     )
                 except DiscordRestError as exc:
                     _log.warning("recording %s: post done-msg failed: %s", note_id, exc)
@@ -1251,7 +1296,7 @@ async def route_to_plan_author(
                 try:
                     await rest.create_message(
                         pointer_id,
-                        f"Created <#{channel_id}> — routed Comulytic note `{note_id}` to plan-author.",
+                        f"Created <#{channel_id}> — routed Comulytic note `{note_id}` to oc-assistant.",
                     )
                 except DiscordRestError as exc:
                     _log.warning("recording %s: post pointer failed: %s", note_id, exc)

@@ -24,11 +24,11 @@ in a session channel are forwarded to the bound opencode session.
 5. Enable the **Message Content** privileged intent in the Discord Developer
    Portal (Bot -> Privileged Gateway Intents) — without it, plain-text
    follow-ups silently break.
-6. **Install the bundled `plan-author` opencode agent** into the project the
+6. **Install the bundled `oc-assistant (Bobby)` opencode agent** into the project the
    bot will run against: `python -m opencode_discord_bot.install_agent` (run
    from that project's root, or pass `--dest <project root>`). See "Install the
-   plan-author agent" below. Skip this only if the target project already has
-   its own `plan-author` agent you want to keep. The `--dest` MUST match
+   oc-assistant (Bobby) agent" below. Skip this only if the target project already has
+   its own `oc-assistant (Bobby)` agent you want to keep. The `--dest` MUST match
    `OPENCODE_SERVE_CWD` (or the repo root if you left it empty), otherwise
    the opencode server won't find the agent.
 7. Sync slash commands to your guild (one-shot; the bot does NOT auto-sync
@@ -151,7 +151,7 @@ libs aren't found — re-check `LD_LIBRARY_PATH` (Linux) or `PATH` (Windows).
 | `OPENCODE_SERVER_PASSWORD` | **Required** | Any string you choose | `opencode serve` basic auth |
 | `DISCORD_BOT_GUILD_ID` | Optional (0 = global) | Developer Mode -> right-click server -> Copy ID | Slash-command sync target |
 | `OPENCODE_DEFAULT_MODEL` | Optional | Your provider's model id (e.g. `ollama-cloud/glm-5.2`, `anthropic/claude-sonnet-4`, `openai/gpt-5`) | Override the model for `/oc` + plain-text follow-ups. Empty = the opencode default agent's frontmatter `model:` wins. |
-| `OPENCODE_PLAN_AUTHOR_MODEL` | Optional | Same as above | Override the model for `/oc_plan`, `/oc_voice`, `/oc_talk`, voice-message trigger, and the Comulytic bridge (all `agent="plan-author"`). Empty = the plan-author agent's frontmatter model wins. |
+| `OPENCODE_ASSISTANT_MODEL` | Optional | Same as above | Override the model for `/oc_plan`, `/oc_voice`, `/oc_talk`, voice-message trigger, and the Comulytic bridge (all `agent="oc-assistant"`). Empty = the oc-assistant (Bobby) agent's frontmatter model wins. |
 | `OPENAI_API_KEY` | Optional | https://platform.openai.com/api-keys | TTS + cloud STT fallback (skip if `voice_tts_enabled=false` AND `voice_stt_provider=local`) |
 | `OLLAMA_AUTH_KEY` | Optional | https://ollama.com | LLM channel-name slugs (skip = regex fallback) |
 
@@ -199,22 +199,24 @@ model wins):
 # Model for /oc + plain-text follow-ups (agent=None):
 OPENCODE_DEFAULT_MODEL=ollama-cloud/glm-5.2
 # Model for /oc_plan, /oc_voice, /oc_talk, voice-msg trigger, Comulytic bridge:
-OPENCODE_PLAN_AUTHOR_MODEL=anthropic/claude-sonnet-4
+OPENCODE_ASSISTANT_MODEL=anthropic/claude-sonnet-4
 ```
 
-## Install the plan-author agent
+## Install the oc-assistant (Bobby) agent
 
 The bot's `/oc_plan`, `/oc_voice`, `/oc_talk`, voice-message trigger, and
-Comulytic-bridge paths all route prompts to opencode's `plan-author` agent.
+Comulytic-bridge paths all route prompts to opencode's `oc-assistant (Bobby)` agent.
 That agent is **NOT** built into opencode itself — it lives in the target
-project's `.opencode/agent/plan-author.md`. If the project doesn't have one,
+project's `.opencode/agent/oc-assistant.md`. If the project doesn't have one,
 those paths will fail agent resolution on the opencode server side.
 
-This package ships a **fully generic, self-contained** plan-author agent
-(`opencode_discord_bot/agent/plan-author.md`) that works in any project — it
-reads the target project's own `AGENTS.md` if present, writes only to
-`.opencode/plans/`, and is compatible with the `change-outline` skill's
-resume/execute flow if that skill is also installed.
+This package ships a **fully generic, self-contained** oc-assistant (Bobby) agent
+(`opencode_discord_bot/agent/oc-assistant.md`) that works in any project — it
+reads the target project's own `AGENTS.md` if present, writes only under
+`.opencode/assistant/{plans,notes,thoughts}/` (separate from the root
+toolkit's `.opencode/plans/`; the root plan-management skills
+(`plan-dashboard`/`plan-triage`/the desktop outline skill) do NOT see
+Bobby's artifacts).
 
 Install it into the project the bot will run against:
 
@@ -225,13 +227,13 @@ python -m opencode_discord_bot.install_agent
 # Or from anywhere, pointing at the project root:
 python -m opencode_discord_bot.install_agent --dest /path/to/your/project
 
-# Overwrite an existing plan-author.md without prompting:
+# Overwrite an existing oc-assistant.md without prompting:
 python -m opencode_discord_bot.install_agent --force
 ```
 
 By default the install prompts before overwriting an existing
-`plan-author.md` so a project that has its own customized agent isn't silently
-clobbered. The agent lands at `<dest>/.opencode/agent/plan-author.md`.
+`oc-assistant.md` so a project that has its own customized agent isn't silently
+clobbered. The agent lands at `<dest>/.opencode/agent/oc-assistant.md`.
 
 **Why this matters with `OPENCODE_SERVE_CWD`:** the opencode server resolves
 agents relative to its working directory (the `opencode_serve_cwd` setting,
@@ -264,7 +266,7 @@ guild-specific IDs (`DISCORD_BOT_SESSION_CATEGORY_ID`,
    category, so `/oc_cleanup` — which deletes every text channel under
    `DISCORD_BOT_SESSION_CATEGORY_ID` — won't wipe them):
    - `voice-recordings` → set as `VOICE_MESSAGE_TRIGGER_CHANNEL_ID`
-     (voice messages posted here start new plan-author sessions).
+     (voice messages posted here start new oc-assistant (Bobby) sessions).
    - `bot-commands` → set as `DISCORD_BOT_ALLOWED_CHANNEL_IDS` (a
      one-element JSON list so slash commands are restricted to this
      channel + bot-created session channels).
@@ -416,7 +418,7 @@ After setup, verify each piece:
 The Comulytic bridge is a separate long-running process that polls Comulytic's
 cloud API for new Note Pro recordings, downloads each recording's audio, and
 transcribes it LOCALLY via faster-whisper (the same pipeline `/oc_talk` uses),
-then routes the transcript to opencode's `plan-author` agent — no manual
+then routes the transcript to opencode's `oc-assistant (Bobby)` agent — no manual
 Discord upload, no phone-side automation, no Comulytic cloud ASR. It runs
 independently of the Discord bot (`python -m opencode_discord_bot`) but is
 also auto-spawned in-process by the bot when `COMULYTIC_ENABLED=true` +
@@ -546,7 +548,7 @@ polling bridge continues to run regardless of the probe result.
 When `DISCORD_BOT_TOKEN` + `DISCORD_BOT_GUILD_ID` are set (the same values
 the main bot uses — the bridge reads them from the same `.env`), the bridge
 additionally creates a Discord text channel for each routed recording and
-posts the plan-author conversation there — just like `/oc_talk`, but with
+posts the oc-assistant (Bobby) conversation there — just like `/oc_talk`, but with
 Comulytic as the audio source instead of a Discord attachment.
 
 **Flow:** when a new Comulytic recording's audio is downloaded and locally
@@ -566,15 +568,15 @@ transcribed (faster-whisper), the bridge:
    small cloud model via `SLUG_MODEL` + `OLLAMA_AUTH_KEY`) to upgrade the
    channel name from the regex slug to a real LLM-generated slug.
 6. Posts a `Working on session <sid>…` progress message (throttled progress
-   edits while plan-author runs).
-7. Sends the transcript to `plan-author` (optionally prepended with a
+   edits while oc-assistant (Bobby) runs).
+7. Sends the transcript to `oc-assistant (Bobby)` (optionally prepended with a
    `[PLAN_TYPE_PRESELECTED: ...]` directive when `COMULYTIC_PLAN_TYPE` is set).
-8. Surfaces any plan-author clarifying questions as plain-text prompts in the
+8. Surfaces any oc-assistant (Bobby) clarifying questions as plain-text prompts in the
    channel (numbered options + a timeout) and polls
    `GET /channels/{id}/messages` for the user's plain-text reply. The user
    types a number or any text; the bridge parses it and calls
    `reply_question` / `reject_question` to unblock the agent turn.
-9. Posts the final plan-author response in the channel (chunked into
+9. Posts the final oc-assistant (Bobby) response in the channel (chunked into
    ≤2000-char pieces).
 10. Optionally posts a `Created <#channelId>` pointer to
     `COMULYTIC_DISCORD_POINTER_CHANNEL_ID` (a "firehose" channel to watch for
@@ -604,7 +606,7 @@ follow-up path is a future enhancement (the bridge would need to either poll
 its channels for new messages, or share the SessionRouter file with locking).
 
 **Graceful degradation.** If `DISCORD_BOT_TOKEN` is empty or
-`DISCORD_BOT_GUILD_ID` is 0, the bridge routes to plan-author and LOGs the
+`DISCORD_BOT_GUILD_ID` is 0, the bridge routes to oc-assistant (Bobby) and LOGs the
 response only (the original behavior). A WARNING is logged on startup. No
 Discord channel is created. This is the default if you only set the Comulytic
 env vars and not the Discord ones.
@@ -613,11 +615,11 @@ env vars and not the Discord ones.
 - `COMULYTIC_DISCORD_POINTER_CHANNEL_ID` (default 0): channel id to post the
   `Created <#channel>` pointer in. 0 = no pointer.
 - `COMULYTIC_QUESTION_TIMEOUT_SECONDS` (default 300): how long to wait for
-  the user's plain-text reply to a plan-author clarifying question before
+  the user's plain-text reply to a oc-assistant (Bobby) clarifying question before
   rejecting it (unblocking the agent). The main bot uses buttons that wait
   indefinitely; plain-text polling needs a ceiling.
 - `COMULYTIC_QUESTION_POLL_INTERVAL_SECONDS` (default 2.0): poll cadence for
-  `GET /question` + `GET /permission` while plan-author runs.
+  `GET /question` + `GET /permission` while oc-assistant (Bobby) runs.
 
 ## Troubleshooting Commands
 

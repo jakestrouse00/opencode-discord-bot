@@ -1,29 +1,30 @@
-"""Install the bundled `plan-author` opencode agent into a target project.
+"""Install the bundled `oc-assistant` opencode agent (Bobby) into a target project.
 
 Usage:
     python -m opencode_discord_bot.install_agent [--dest <path>] [--force]
 
-Copies the bundled `plan-author.md` (shipped inside this package at
-`opencode_discord_bot/agent/plan-author.md`) into the target project's
+Copies the bundled `oc-assistant.md` (shipped inside this package at
+`opencode_discord_bot/agent/oc-assistant.md`) into the target project's
 `.opencode/agent/` directory so the opencode server (spawned by the Discord
-bot against that project) can discover and invoke it via `agent="plan-author"`.
+bot against that project) can discover and invoke it via `agent="oc-assistant"`.
 
-The bundled agent is a fully generic, self-contained Plan Author subagent —
-it reads the target project's own `AGENTS.md` (if present), writes only to
-`.opencode/plans/`, and is what the bot's `/oc_plan`, `/oc_voice`, `/oc_talk`,
-voice-message trigger, and Comulytic-bridge paths route to. Without it
-installed in the project the bot's `opencode serve` is running against, those
-paths will 404 / fail agent resolution.
+The bundled agent is a fully generic, self-contained assistant subagent
+("Bobby") — it reads the target project's own `AGENTS.md` (if present),
+writes only under `.opencode/assistant/{plans,notes,thoughts}/`, and is what
+the bot's `/oc_plan`, `/oc_voice`, `/oc_talk`, voice-message trigger, and
+Comulytic-bridge paths route to. Without it installed in the project the
+bot's `opencode serve` is running against, those paths will 404 / fail
+agent resolution.
 
 Defaults:
     --dest  the current working directory (`Path.cwd()`). The agent lands at
-            `<dest>/.opencode/agent/plan-author.md`. Override when your `.env`
+            `<dest>/.opencode/agent/oc-assistant.md`. Override when your `.env`
             lives in a subdirectory but your project root (and `.opencode/`)
             lives elsewhere — mirrors the `OPENCODE_SERVE_CWD` setting.
-    --force overwrite an existing `plan-author.md` without prompting. By
+    --force overwrite an existing `oc-assistant.md` without prompting. By
             default the install prompts before overwriting (and refuses on
             any non-yes answer), so a project that has its own customized
-            plan-author isn't silently clobbered.
+            oc-assistant isn't silently clobbered.
 
 Reads the bundled file via `importlib.resources` so it works the same whether
 the package was installed via `pip install -e .`, `pip install git+...`, or a
@@ -36,7 +37,7 @@ Exit codes:
       package).
 
 Run from the target project's root directory (or pass `--dest <project root>`)
-for the simplest workflow. See `SETUP_GUIDE.md` "Install the plan-author
+for the simplest workflow. See `SETUP_GUIDE.md` "Install the oc-assistant
 agent" section.
 """
 
@@ -49,18 +50,21 @@ from importlib.resources import files as _resource_files
 from pathlib import Path
 
 # The bundled agent file ships inside the package at this relative path.
-_AGENT_RESOURCE = "agent/plan-author.md"
+_AGENT_RESOURCE = "agent/oc-assistant.md"
 # Where it lands in the target project (relative to --dest).
-_AGENT_DEST_REL = Path(".opencode") / "agent" / "plan-author.md"
+_AGENT_DEST_REL = Path(".opencode") / "agent" / "oc-assistant.md"
+# Legacy filename from before the rename — left in place by the installer if
+# present, but flagged as stale so the user knows it's safe to delete.
+_STALE_LEGACY_DEST_REL = Path(".opencode") / "agent" / "plan-author.md"
 
 
 def _bundled_text() -> str:
-    """Read the bundled plan-author.md text from package resources.
+    """Read the bundled oc-assistant.md text from package resources.
 
     `importlib.resources.files("opencode_discord_bot")` returns a Traversable
     rooted at the package's install location (works for editable installs,
     wheels, and zipped distributions). The bundled file lives at
-    `opencode_discord_bot/agent/plan-author.md` inside the package.
+    `opencode_discord_bot/agent/oc-assistant.md` inside the package.
     """
     root = _resource_files("opencode_discord_bot")
     resource = root.joinpath(_AGENT_RESOURCE)
@@ -80,9 +84,9 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         prog="python -m opencode_discord_bot.install_agent",
         description=(
-            "Install the bundled plan-author opencode agent into a target "
-            "project's .opencode/agent/ directory so the Discord bot can "
-            "route plan-author prompts to it."
+            "Install the bundled oc-assistant opencode agent (Bobby) into a "
+            "target project's .opencode/agent/ directory so the Discord bot "
+            "can route oc-assistant prompts to it."
         ),
     )
     p.add_argument(
@@ -91,19 +95,19 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         default=Path.cwd(),
         help=(
             "Target project root (defaults to the current working directory). "
-            "The agent lands at <dest>/.opencode/agent/plan-author.md."
+            "The agent lands at <dest>/.opencode/agent/oc-assistant.md."
         ),
     )
     p.add_argument(
         "--force",
         action="store_true",
-        help="Overwrite an existing plan-author.md without prompting.",
+        help="Overwrite an existing oc-assistant.md without prompting.",
     )
     return p.parse_args(argv)
 
 
 def install(dest: Path, *, force: bool = False) -> int:
-    """Copy the bundled plan-author.md into `<dest>/.opencode/agent/`.
+    """Copy the bundled oc-assistant.md into `<dest>/.opencode/agent/`.
 
     Returns the process exit code (0 on success, 1 on refusal/error). Public
     function so other entry points (tests, future install scripts) can call
@@ -137,16 +141,21 @@ def install(dest: Path, *, force: bool = False) -> int:
     target.parent.mkdir(parents=True, exist_ok=True)
     text = _bundled_text()
     target.write_text(text, encoding="utf-8")
-    print(f"Installed plan-author agent to {target}")
+    print(f"Installed oc-assistant agent (Bobby) to {target}")
     print(
         "The Discord bot's /oc_plan, /oc_voice, /oc_talk, voice-message, and "
         "Comulytic-bridge paths will now route to this agent when opencode "
         "serve runs against this project."
     )
-    if not force and target.exists():
-        # Already-exists branch above handled the overwrite; this is the
-        # fresh-install path. (No extra output needed; the line above covers it.)
-        pass
+    # Stale-file notice: a prior install_agent run wrote plan-author.md here;
+    # the bot no longer routes to it. Don't auto-delete — the user may have a
+    # customized copy they want to inspect before removing.
+    legacy = dest / _STALE_LEGACY_DEST_REL
+    if legacy.exists() and legacy.resolve() != target.resolve():
+        print(
+            "Note: a stale .opencode/agent/plan-author.md is still present; "
+            "the bot no longer routes to it — safe to delete."
+        )
     return 0
 
 

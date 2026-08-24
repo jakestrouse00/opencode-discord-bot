@@ -247,7 +247,7 @@ class OpencodeBot(discord.Bot):
 
         @self.slash_command(
             name="oc_plan",
-            description="Send a change to opencode's plan-author subagent (reasoned, plan-only).",
+            description="Send a change to opencode's oc-assistant (Bobby) subagent (reasoned, plan-only).",
             guild_ids=_guild_ids,
         )
         async def oc_plan(
@@ -281,7 +281,7 @@ class OpencodeBot(discord.Bot):
                 plan_type or "(auto-classify)",
                 _log_preview(change),
             )
-            await self._run_prompt(ctx, prompt, agent="plan-author", echo_prompt=change)
+            await self._run_prompt(ctx, prompt, agent="oc-assistant", echo_prompt=change)
 
         @self.slash_command(
             name="oc_new",
@@ -406,7 +406,7 @@ class OpencodeBot(discord.Bot):
 
         @self.slash_command(
             name="oc_voice",
-            description="Join a voice channel, transcribe your spoken plan/note, route to plan-author.",
+            description="Join a voice channel, transcribe your spoken plan/note, route to oc-assistant (Bobby).",
             guild_ids=_guild_ids,
         )
         async def oc_voice(
@@ -462,7 +462,7 @@ class OpencodeBot(discord.Bot):
 
         @self.slash_command(
             name="oc_talk",
-            description="Upload an audio/video recording of your thoughts; extract audio, transcribe, route to plan-author.",
+            description="Upload an audio/video recording of your thoughts; extract audio, transcribe, route to oc-assistant.",
             guild_ids=_guild_ids,
         )
         async def oc_talk(
@@ -630,12 +630,12 @@ class OpencodeBot(discord.Bot):
             text = (
                 "**opencode bot commands**\n"
                 "/oc `<prompt>` — create a new session channel and send the prompt.\n"
-                "/oc_plan `<change>` — same, but routed to the plan-author subagent "
+                "/oc_plan `<change>` — same, but routed to the oc-assistant (Bobby) subagent "
                 "(drafts a reasoned change plan; writes only to .opencode/plans/).\n"
                 "   • optional `plan_type`: 'Planned update' or 'Note to self' "
                 "(otherwise the agent classifies from your wording).\n"
                 "/oc_voice `<mode> [voice_channel]` — join a voice channel, listen to "
-                "your spoken plan/note, transcribe and route it to the plan-author "
+                "your spoken plan/note, transcribe and route it to the oc-assistant (Bobby) "
                 "agent. `mode`: 'Planned update' or 'Note to self'. Say 'Stop "
                 "Conversation', use `/oc_voice_stop`, or wait 10s of silence to "
                 "finish. The bot speaks its response back in the voice channel (if "
@@ -643,7 +643,7 @@ class OpencodeBot(discord.Bot):
                 "/oc_voice_stop — manually stop the active voice session and process "
                 "the transcript.\n"
                 "/oc_talk `<recording> [plan_type]` — upload an audio or video recording "
-                "of your thoughts; transcribe and route to the plan-author agent (same "
+                "of your thoughts; transcribe and route to the oc-assistant (Bobby) agent (same "
                 "as /oc_plan but voice-in, no live channel join). For video files, the "
                 "audio track is extracted via ffmpeg and only the audio is transcribed. "
                 "`plan_type`: 'Planned update' or 'Note to self' (optional). Accepts "
@@ -651,7 +651,7 @@ class OpencodeBot(discord.Bot):
                 "**Voice messages:** send a Discord voice message (press-hold the mic in "
                 "the mobile composer) in a session channel to transcribe it as a "
                 "follow-up, or in the #new-plans trigger channel to start a new "
-                "plan-author session. Same pipeline as /oc_talk, no slash command "
+                "oc-assistant (Bobby) session. Same pipeline as /oc_talk, no slash command "
                 "needed.\n"
                 "/oc_new — unbind this channel's session (stop forwarding plain-text here).\n"
                 "/oc_session — show this channel's current session + status.\n"
@@ -943,7 +943,7 @@ class OpencodeBot(discord.Bot):
            category) so `/oc_cleanup` — which deletes every text channel
            under `discord_bot_session_category_id` — won't wipe them:
            - `voice-recordings` — repurposed as `VOICE_MESSAGE_TRIGGER_CHANNEL_ID`
-             (voice messages posted there start new plan-author sessions).
+             (voice messages posted there start new oc-assistant (Bobby) sessions).
            - `bot-commands` — repurposed as `DISCORD_BOT_ALLOWED_CHANNEL_IDS`
              (a one-element JSON list so slash commands are restricted to
              this channel + bot-created session channels).
@@ -1106,7 +1106,7 @@ class OpencodeBot(discord.Bot):
             f"- Category **OpenCode Sessions** → id `{category.id}`\n"
             f"- Channel {recordings_ch.mention} → id `{recordings_ch.id}` "
             "(set as `VOICE_MESSAGE_TRIGGER_CHANNEL_ID` — voice messages "
-            "posted here start new plan-author sessions)\n"
+            "posted here start new oc-assistant (Bobby) sessions)\n"
             f"- Channel {commands_ch.mention} → id `{commands_ch.id}` "
             "(set as `DISCORD_BOT_ALLOWED_CHANNEL_IDS` — slash commands now "
             "restricted to this channel + bot-created session channels)\n"
@@ -1454,7 +1454,7 @@ class OpencodeBot(discord.Bot):
         (c) Non-session channel + voice attachment + the channel is the
             configured voice-message trigger channel
             (``config.voice_message_trigger_channel_id``): start a new
-            plan-author session from the transcript (``_run_talk_from_message``).
+            oc-assistant session from the transcript (``_run_talk_from_message``).
             The trigger channel is #new-plans (id 1533242090862149842) by
             default; 0 disables the new-session path.
         (d) Else: ignored (non-session, non-voice — the same behavior as
@@ -1563,7 +1563,7 @@ class OpencodeBot(discord.Bot):
             and message.channel.id == config.voice_message_trigger_channel_id
         ):
             _log.info(
-                "voice message in trigger channel #%s -> new plan-author session "
+                "voice message in trigger channel #%s -> new oc-assistant session "
                 "(file=%s, size=%dB)",
                 message.channel.name,
                 voice_att.filename,
@@ -2060,7 +2060,7 @@ class OpencodeBot(discord.Bot):
 
         parts = [{"type": "text", "text": prompt}]
         try:
-            await self.client.send_prompt_async(sid, parts, agent="plan-author")
+            await self.client.send_prompt_async(sid, parts, agent="oc-assistant")
         except OpencodeError as e:
             await text_channel.send(
                 f"Failed to send voice prompt to session `{sid}`: {e}"
@@ -2121,7 +2121,7 @@ class OpencodeBot(discord.Bot):
         slash invoker with the channel pointer (so the user has the control
         channel immediately) → THEN download + transcribe the audio → edit the
         status message in place to show the transcript → send the transcript to
-        the ``plan-author`` subagent → drive the session to completion (no live
+        the ``oc-assistant`` subagent → drive the session to completion (no live
         voice channel join, no TTS playback — text-only responses).
         """
         if not self._channel_ok(ctx.channel_id):
@@ -2249,7 +2249,7 @@ class OpencodeBot(discord.Bot):
 
         parts = [{"type": "text", "text": prompt}]
         try:
-            await self.client.send_prompt_async(sid, parts, agent="plan-author")
+            await self.client.send_prompt_async(sid, parts, agent="oc-assistant")
         except OpencodeError as e:
             await new_channel.send(f"Failed to send prompt to session `{sid}`: {e}")
             return
@@ -2273,7 +2273,7 @@ class OpencodeBot(discord.Bot):
         attachment: discord.Attachment,
     ) -> None:
         """Transcribe a voice-message attachment posted in the trigger channel
-        and start a new plan-author session (the voice-in analog of
+        and start a new oc-assistant session (the voice-in analog of
         ``_run_talk_session``, but triggered by a plain message instead of a
         slash command).
 
@@ -2283,7 +2283,7 @@ class OpencodeBot(discord.Bot):
         the trigger channel (``message.channel``) via ``message.channel.send``;
         the status/progress messages go into the new session channel via
         ``new_channel.send``. No ``plan_type`` directive is sent (a plain
-        message has no slash-option UI), so the plan-author agent classifies
+        message has no slash-option UI), so the oc-assistant agent classifies
         the transcript on its own.
 
         Flow: resolve guild → create opencode session → ``_slugify_prompt``
@@ -2291,7 +2291,7 @@ class OpencodeBot(discord.Bot):
         pointer into the trigger channel → post "Transcribing…" status in the
         new channel → download + ``extract_audio_to_wav`` + ``transcribe_audio``
         (try/except edits the status on failure) → empty-transcript guard →
-        fire-and-forget LLM slug rename → send transcript to plan-author →
+        fire-and-forget LLM slug rename → send transcript to oc-assistant →
         edit status to show transcript → drive the session.
         """
         guild = message.guild
@@ -2399,13 +2399,13 @@ class OpencodeBot(discord.Bot):
             )
         )
 
-        # Send the transcript to the plan-author agent with no plan_type
+        # Send the transcript to the oc-assistant agent with no plan_type
         # directive (a plain message has no slash-option UI, so let the agent
         # classify from the transcript wording — matches /oc_talk with
         # plan_type=None).
         parts = [{"type": "text", "text": f"[DISCORD_BOT]\n\n{transcript}"}]
         try:
-            await self.client.send_prompt_async(sid, parts, agent="plan-author")
+            await self.client.send_prompt_async(sid, parts, agent="oc-assistant")
         except OpencodeError as e:
             await new_channel.send(f"Failed to send prompt to session `{sid}`: {e}")
             return

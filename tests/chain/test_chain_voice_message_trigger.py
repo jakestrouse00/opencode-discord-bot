@@ -1,4 +1,4 @@
-"""Chain C: voice message in trigger channel -> transcribe -> plan-author -> questions -> final.
+"""Chain C: voice message in trigger channel -> transcribe -> oc-assistant -> questions -> final.
 
 Dispatches through ``bot.on_message`` so the full intake -> drive path is
 exercised. Real STT on the sample clip; opencode REST scripted.
@@ -37,7 +37,7 @@ def trigger_config(monkeypatch):
 async def test_chain_voice_message_trigger_drives_new_session(
     bot_instance, trigger_config, sample_mp3_bytes, monkeypatch
 ):
-    """Voice message in the trigger channel -> new plan-author session + final."""
+    """Voice message in the trigger channel -> new oc-assistant session + final."""
     trigger_id = 8888
     monkeypatch.setattr(config, "voice_message_trigger_channel_id", trigger_id)
     guild = FakeGuild()
@@ -67,10 +67,10 @@ async def test_chain_voice_message_trigger_drives_new_session(
     # A new session was created.
     create_calls = [c for c in bot_instance.client.calls if c[0] == "create_session"]
     assert create_calls
-    # send_prompt_async with plan-author.
+    # send_prompt_async with oc-assistant.
     prompt_calls = [c for c in bot_instance.client.calls if c[0] == "send_prompt_async"]
     assert prompt_calls
-    assert prompt_calls[0][2]["agent"] == "plan-author"
+    assert prompt_calls[0][2]["agent"] == "oc-assistant"
     # A new channel was created in the guild.
     assert guild.created_channels
     # The trigger channel got a pointer message.

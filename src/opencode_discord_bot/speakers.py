@@ -17,7 +17,7 @@ needed. Unknown speakers (no reference match above
 ``config.speaker_match_threshold``) get generic ``Speaker N`` labels in
 encounter order.
 
-Transcript format sent to plan-author::
+Transcript format sent to oc-assistant::
 
     Jake: hey let's ship the speaker ID feature.
     Speaker 1: sounds good, I'll review the PR.

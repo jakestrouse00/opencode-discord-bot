@@ -80,7 +80,7 @@ def chain_config(monkeypatch, tmp_path):
 async def test_chain_comulytic_full_with_real_stt(
     chain_config, sample_mp3_bytes, stub_slug, tmp_path, monkeypatch
 ):
-    """Chain A: Comulytic poll + pull + real STT + route to plan-author + Discord.
+    """Chain A: Comulytic poll + pull + real STT + route to oc-assistant + Discord.
 
     Real ffmpeg + faster-whisper on the sample clip; fake Comulytic API
     returns the clip bytes; fake opencode REST scripts one question + a
@@ -126,10 +126,10 @@ async def test_chain_comulytic_full_with_real_stt(
     assert rest.created_channels
     # The transcript was posted to the channel.
     assert any("Transcribed prompt" in content for _, content in rest.posted)
-    # send_prompt_async was called with agent="plan-author".
+    # send_prompt_async was called with agent="oc-assistant".
     prompt_calls = [c for c in opencode.calls if c[0] == "send_prompt_async"]
     assert prompt_calls
-    assert prompt_calls[0][2]["agent"] == "plan-author"
+    assert prompt_calls[0][2]["agent"] == "oc-assistant"
     # The question was surfaced + answered (reply_question called).
     reply_calls = [c for c in opencode.calls if c[0] == "reply_question"]
     assert reply_calls
@@ -231,7 +231,7 @@ async def test_chain_comulytic_log_only_no_discord(
         rest=None, router=router,
     )
     # No Discord channel was created (log-only path).
-    # send_prompt_async was called with plan-author.
+    # send_prompt_async was called with oc-assistant.
     prompt_calls = [c for c in opencode.calls if c[0] == "send_prompt_async"]
     assert prompt_calls
-    assert prompt_calls[0][2]["agent"] == "plan-author"
+    assert prompt_calls[0][2]["agent"] == "oc-assistant"

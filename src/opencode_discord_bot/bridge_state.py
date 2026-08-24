@@ -29,7 +29,7 @@ def mark_active(sid: str) -> None:
     """Record that the bridge is currently driving ``sid`` (clarifying
     questions in flight, prompt mid-turn, etc.).
 
-    Called by ``route_to_plan_author`` right after ``create_session``
+    Called by ``route_to_assistant`` right after ``create_session``
     returns the id. Safe to call repeatedly for the same sid (idempotent
     set add). Must be balanced by ``clear_active`` once the drive ends.
     """
@@ -41,7 +41,7 @@ def mark_active(sid: str) -> None:
 def clear_active(sid: str) -> None:
     """Mark ``sid`` as no longer being driven by the bridge.
 
-    Called in the ``finally`` wrapping ``route_to_plan_author``'s drive
+    Called in the ``finally`` wrapping ``route_to_assistant``'s drive
     section, so it runs on success, timeout, ``OpencodeError``, and
     cancellation (``OpencodeBot.close`` cancels the bridge task).
     Discarding a missing sid is a no-op, so a double-clear is harmless.

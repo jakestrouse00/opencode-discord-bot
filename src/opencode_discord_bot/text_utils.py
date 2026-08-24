@@ -62,17 +62,34 @@ def _extract_text(parts: list[dict]) -> str:
     """Concatenate all text parts from an opencode message's `parts` array.
 
     `list_messages` returns ``[{"info": Message, "parts": [Part]}, ...]`` where
-    each `Part` is ``{"type": "text"|"image"|"tool", "text": ... | ...}``.
-    Returns the joined text, or "" if no text parts.
+    each `Part` is ``{"type": "text"|"reasoning"|"image"|"tool", "text": ... | ...}``.
+    ``text`` parts are preferred; ``reasoning`` parts are a fallback so a
+    reasoning-only assistant turn (which some models emit in place of a
+    final ``text`` part) still yields content. Returns the joined text
+    (text parts first, then reasoning parts), or "" if neither is present.
     """
-    out: list[str] = []
+    text_out: list[str] = []
+    reasoning_out: list[str] = []
     for part in parts:
         if not isinstance(part, dict):
             continue
-        if part.get("type") == "text":
+        ptype = part.get("type")
+        if ptype == "text":
             t = part.get("text")
             if t:
-                out.append(t)
+                text_out.append(t)
+        elif ptype == "reasoning":
+            # Reasoning parts carry a `text` field per
+            # packages/schema/src/v1/session.ts (~line 118-128) and are valid
+            # assistant content. Some models (notably with `variant: medium`)
+            # emit the summary as reasoning and end the turn after a `write`
+            # tool call without a final `text` part; without this fallback
+            # the assistant message would yield "" and the bridge would
+            # incorrectly fall back to the user prompt.
+            t = part.get("text")
+            if t:
+                reasoning_out.append(t)
+    out = text_out + reasoning_out
     return "\n".join(out) if out else ""
 
 
@@ -81,10 +98,15 @@ def _final_assistant_text(messages: list[dict]) -> str:
 
     `list_messages` returns ``[{"info": Message, "parts": [Part]}, ...]``. We
     want the last message whose `info.role == "assistant"` and whose parts
-    contain text. Falls back to the last message with any text.
+    contain text or reasoning. Returns "" if no assistant message with
+    text/reasoning parts exists — **does NOT fall back to non-assistant
+    messages**, because the only non-assistant text in a driven session is
+    the user prompt (which, on the Comulytic bridge, is the transcript
+    prefixed with ``[DISCORD_BOT]``/``[COMULYTIC_BRIDGE]`` tags). Falling
+    back to the user prompt would echo the transcript as if it were the
+    agent's reply — the exact bug this function previously had.
     """
     last_assistant: str | None = None
-    last_any: str | None = None
     for entry in messages:
         if not isinstance(entry, dict):
             continue
@@ -93,10 +115,36 @@ def _final_assistant_text(messages: list[dict]) -> str:
         text = _extract_text(parts)
         if not text:
             continue
-        last_any = text
         if info.get("role") == "assistant":
             last_assistant = text
-    return last_assistant if last_assistant is not None else (last_any or "")
+    return last_assistant if last_assistant is not None else ""
+
+
+# Internal directive tags the Comulytic bridge prepends to the prompt sent
+# to oc-assistant (see bridge.py:route_to_assistant). They never appear in an
+# agent reply. Used by `_looks_like_prompt` to detect a regression where the
+# prompt leaks through as the "response".
+_DIRECTIVE_TAGS = ("[DISCORD_BOT]", "[COMULYTIC_BRIDGE]")
+
+
+def _looks_like_prompt(text: str) -> bool:
+    """Heuristic: does ``text`` look like the user prompt rather than an
+    agent reply?
+
+    The Comulytic bridge prepends ``[DISCORD_BOT]`` and ``[COMULYTIC_BRIDGE]``
+    directive lines to the prompt it sends to oc-assistant
+    (bridge.py:route_to_assistant, ~line 1003-1005). Those tags are stripped
+    by the agent before processing and never appear in an agent's output.
+    If the extracted "final assistant text" contains either tag, it is
+    almost certainly the user prompt that leaked through (e.g. via a
+    fallback to a non-assistant message, or a malformed message list) — not
+    a real reply. Used by the bridge as a belt-and-suspenders regression
+    guard so a leak is caught and logged instead of posted to the Discord
+    channel as the "response".
+    """
+    if not text:
+        return False
+    return any(tag in text for tag in _DIRECTIVE_TAGS)
 
 
 def _slugify_prompt(prompt: str, fallback: str) -> str:

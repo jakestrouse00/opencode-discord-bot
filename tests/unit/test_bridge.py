@@ -1,7 +1,7 @@
-"""Unit tests for ``bridge.py`` — helpers + ``poll_once`` + ``route_to_plan_author``.
+"""Unit tests for ``bridge.py`` — helpers + ``poll_once`` + ``route_to_assistant``.
 
 ``_load_seen``/``_save_seen`` use real files at tmp_path. ``poll_once`` and
-``route_to_plan_author`` use the scripted fakes. STT + ffmpeg run REAL on
+``route_to_assistant`` use the scripted fakes. STT + ffmpeg run REAL on
 the sample clip where a chain touches ``_transcribe_and_route``.
 """
 
@@ -19,6 +19,7 @@ from tests.fakes import (
     ScriptedComulyticClient,
     FakeChannel,
     assistant_message,
+    user_message,
     discord_message_dict,
     question_request,
 )
@@ -196,11 +197,11 @@ async def test_poll_once_fast_path_newest_in_seen(tmp_seen_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# route_to_plan_author (log-only path — no Discord configured)
+# route_to_assistant (log-only path — no Discord configured)
 # ---------------------------------------------------------------------------
 
 
-async def test_route_to_plan_author_log_only_no_discord(monkeypatch):
+async def test_route_to_assistant_log_only_no_discord(monkeypatch):
     """rest=None → log-only path: create session, send prompt, poll, log."""
     monkeypatch.setattr(config, "discord_bot_token", "")
     monkeypatch.setattr(config, "discord_bot_guild_id", 0)
@@ -214,7 +215,7 @@ async def test_route_to_plan_author_log_only_no_discord(monkeypatch):
     opencode.script("list_messages", [assistant_message("PLAN OUTPUT", mid="m-1")])
     opencode.script("list_questions", [], [])
     opencode.script("list_permissions", [], [])
-    result = await bridge_mod.route_to_plan_author(
+    result = await bridge_mod.route_to_assistant(
         opencode, "transcript text", "n-1", rest=None, router=None
     )
     assert result["session_id"] == "sid-1"
@@ -222,14 +223,113 @@ async def test_route_to_plan_author_log_only_no_discord(monkeypatch):
     assert "PLAN OUTPUT" in result["response"]
 
 
-async def test_route_to_plan_author_create_session_failure_returns_empty(monkeypatch):
+async def test_route_to_assistant_create_session_failure_returns_empty(monkeypatch):
     monkeypatch.setattr(config, "discord_bot_token", "")
     monkeypatch.setattr(config, "discord_bot_guild_id", 0)
     from opencode_discord_bot.opencode_client import OpencodeError
     opencode = ScriptedOpencodeClient()
     opencode.script_exc("create_session", OpencodeError("boom"))
-    result = await bridge_mod.route_to_plan_author(
+    result = await bridge_mod.route_to_assistant(
         opencode, "transcript", "n-1", rest=None, router=None
     )
     assert result["session_id"] is None
     assert result["response"] == ""
+
+
+# ---------------------------------------------------------------------------
+# route_to_assistant — final-response extraction (transcript-echo regression)
+# ---------------------------------------------------------------------------
+
+
+async def test_route_to_assistant_does_not_echo_prompt_when_no_assistant_text(
+    monkeypatch, tmp_path, stub_slug
+):
+    """Regression: when list_messages returns ONLY a user message (the prompt
+    with [DISCORD_BOT]/[COMULYTIC_BRIDGE] tags), the bridge must NOT post the
+    prompt as the response. The old _final_assistant_text fell back to the
+    user message; the fix returns "" and the bridge posts the "no agent text
+    output" diagnostic instead.
+
+    Uses the Discord-active path (rest + router) so we can assert the
+    diagnostic message is posted to the channel and the prompt is NOT.
+    """
+    monkeypatch.setattr(config, "discord_bot_token", "test-token")
+    monkeypatch.setattr(config, "discord_bot_guild_id", 999)
+    monkeypatch.setattr(config, "discord_bot_session_category_id", 0)
+    monkeypatch.setattr(config, "comulytic_plan_type", "")
+    monkeypatch.setattr(config, "comulytic_question_timeout_seconds", 1.0)
+    monkeypatch.setattr(config, "comulytic_question_poll_interval_seconds", 0.0)
+    # Speed up the retry loop so the test doesn't sleep 6s.
+    monkeypatch.setattr(bridge_mod, "_FINAL_TEXT_RETRY_SLEEP", 0.0)
+
+    sid = "sid-regress-1"
+    opencode = ScriptedOpencodeClient()
+    opencode.script("create_session", {"id": sid})
+    opencode.script("send_prompt_async", None)
+    opencode.script("get_session_status",
+                    {sid: {"type": "busy"}},
+                    {sid: {"type": "idle"}})
+    # list_messages returns ONLY a user message carrying the directive tags.
+    # The retry loop will call list_messages up to 3 times; the first scripted
+    # return is the user message, subsequent calls return [] (the default).
+    prompt_text = "[DISCORD_BOT]\n[COMULYTIC_BRIDGE]\n\nthe transcript"
+    opencode.script("list_messages", [user_message(prompt_text, mid="m-u1")])
+    opencode.script("list_questions", [], [], [])
+    opencode.script("list_permissions", [], [], [])
+
+    rest = ScriptedDiscordRest()
+    router = SessionRouter(tmp_path / "bridge-regress-sessions.json")
+
+    result = await bridge_mod.route_to_assistant(
+        opencode, "the transcript", "n-regress", rest=rest, router=router
+    )
+    # The response must be empty (no assistant text found), NOT the prompt.
+    assert result["response"] == ""
+    # The diagnostic message must be posted to the channel.
+    diagnostic_posts = [
+        content for _, content in rest.posted
+        if "No agent text output found" in content
+    ]
+    assert diagnostic_posts, "expected the 'no agent text output' diagnostic to be posted"
+    # The prompt must NOT have been posted as the response.
+    assert not any("[DISCORD_BOT]" in content for _, content in rest.posted)
+    assert not any("[COMULYTIC_BRIDGE]" in content for _, content in rest.posted)
+
+
+async def test_route_to_assistant_retries_then_succeeds(monkeypatch, tmp_path, stub_slug):
+    """The retry loop re-fetches list_messages when the first call returns no
+    assistant text. The second call returns a real assistant message → the
+    bridge posts it instead of the diagnostic.
+    """
+    monkeypatch.setattr(config, "discord_bot_token", "test-token")
+    monkeypatch.setattr(config, "discord_bot_guild_id", 999)
+    monkeypatch.setattr(config, "discord_bot_session_category_id", 0)
+    monkeypatch.setattr(config, "comulytic_plan_type", "")
+    monkeypatch.setattr(config, "comulytic_question_timeout_seconds", 1.0)
+    monkeypatch.setattr(config, "comulytic_question_poll_interval_seconds", 0.0)
+    monkeypatch.setattr(bridge_mod, "_FINAL_TEXT_RETRY_SLEEP", 0.0)
+
+    sid = "sid-retry-1"
+    opencode = ScriptedOpencodeClient()
+    opencode.script("create_session", {"id": sid})
+    opencode.script("send_prompt_async", None)
+    opencode.script("get_session_status",
+                    {sid: {"type": "busy"}},
+                    {sid: {"type": "idle"}})
+    # First list_messages: empty (timing race — text not persisted yet).
+    # Second list_messages: real assistant message.
+    opencode.script("list_messages", [])
+    opencode.script("list_messages", [assistant_message("the real summary", mid="m-1")])
+    opencode.script("list_questions", [], [], [])
+    opencode.script("list_permissions", [], [], [])
+
+    rest = ScriptedDiscordRest()
+    router = SessionRouter(tmp_path / "bridge-retry-sessions.json")
+
+    result = await bridge_mod.route_to_assistant(
+        opencode, "the transcript", "n-retry", rest=rest, router=router
+    )
+    assert result["response"] == "the real summary"
+    assert any("the real summary" in content for _, content in rest.posted)
+    # No diagnostic posted (the retry succeeded).
+    assert not any("No agent text output found" in content for _, content in rest.posted)

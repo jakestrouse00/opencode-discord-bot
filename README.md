@@ -6,6 +6,11 @@ audio — all via slash commands. Each `/oc` invocation creates a fresh
 opencode session in a fresh Discord channel; subsequent plain-text messages
 in that channel are forwarded as follow-up prompts.
 
+> **Not affiliated with the OpenCode team.** This is an independent,
+> self-built project and is not built by, endorsed by, or affiliated
+> with the [OpenCode](https://opencode.ai) team in any way. It integrates
+> with opencode via its public REST API.
+
 ## Install via an AI agent
 
 Want an AI agent to install and configure this bot for you? Copy the
@@ -102,9 +107,9 @@ at `<repo>/.env`; the package reads `.env` from the cwd at launch). Order:
    fallback and the bot still works.
 5. Model overrides (optional) — ASK whether to override the opencode model
    per path. If yes, set `OPENCODE_DEFAULT_MODEL=<id>` (for /oc + plain-text
-   follow-ups, agent=None) and/or `OPENCODE_PLAN_AUTHOR_MODEL=<id>` (for
+   follow-ups, agent=None) and/or `OPENCODE_ASSISTANT_MODEL=<id>` (for
    /oc_plan, /oc_voice, /oc_talk, voice-message trigger, Comulytic
-   bridge; all agent="plan-author"). Empty = each opencode agent's own
+   bridge; all agent="oc-assistant"). Empty = each opencode agent's own
    frontmatter `model:` wins (the default). Model ids are
    provider-scoped, e.g. `ollama-cloud/glm-5.2`, `anthropic/claude-sonnet-4`.
 6. `OPENCODE_SERVE_CWD` — find the project the bot will run against: the
@@ -118,7 +123,7 @@ at `<repo>/.env`; the package reads `.env` from the cwd at launch). Order:
    subdir and can't find plans/agents) — see AGENTS.md "OpencodeServe".
 7. Comulytic bridge (optional) — ASK whether to enable the Comulytic
    cloud bridge (polls Comulytic for Note Pro recordings, transcribes
-   locally via faster-whisper, routes to plan-author). If yes, walk me
+   locally via faster-whisper, routes to oc-assistant (Bobby)). If yes, walk me
    through JWT capture per SETUP_GUIDE.md "Comulytic bridge → Capture the
    JWT + refresh token" (sign in at web.comulytic.ai, DevTools Network,
    copy `data.accessToken` and `data.refreshToken` from the login
@@ -128,15 +133,15 @@ at `<repo>/.env`; the package reads `.env` from the cwd at launch). Order:
    in-process when the bot starts with these set — no separate launch.
    If no, leave `COMULYTIC_ENABLED` unset/false (silent no-op).
 
-Phase 4 — Install the bundled `plan-author` opencode agent into the
+Phase 4 — Install the bundled `oc-assistant (Bobby)` opencode agent into the
 TARGET project (the same directory you set as `OPENCODE_SERVE_CWD`, or
 the repo root if you left it empty):
 `python -m opencode_discord_bot.install_agent --dest <that project root>`
 The bot's /oc_plan, /oc_voice, /oc_talk, voice-message trigger, and
-Comulytic-bridge paths route to opencode's `plan-author` agent, which is
+Comulytic-bridge paths route to opencode's `oc-assistant (Bobby)` agent, which is
 NOT built into opencode — this package ships a generic copy. Without
 this install those paths 404. Use `--force` only if overwriting an
-existing customized plan-author.md is intended.
+existing customized oc-assistant.md is intended.
 
 Phase 5 — Sync slash commands to my guild (one-shot; the bot does NOT
 auto-sync on startup):

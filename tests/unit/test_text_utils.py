@@ -6,6 +6,7 @@ from opencode_discord_bot.text_utils import (
     _split_message,
     _extract_text,
     _final_assistant_text,
+    _looks_like_prompt,
     _slugify_prompt,
 )
 
@@ -73,6 +74,21 @@ class TestExtractText:
     def test_skips_empty_text(self):
         assert _extract_text([{"type": "text", "text": ""}, {"type": "text", "text": "x"}]) == "x"
 
+    def test_reasoning_part_fallback(self):
+        # A reasoning-only message (no `text` part) should still yield the
+        # reasoning text — some models emit the summary as reasoning and end
+        # after the `write` tool with no final `text` part.
+        parts = [{"type": "reasoning", "text": "thinking..."}]
+        assert _extract_text(parts) == "thinking..."
+
+    def test_text_preferred_over_reasoning(self):
+        # When both are present, text parts come first (joined before reasoning).
+        parts = [
+            {"type": "reasoning", "text": "reason"},
+            {"type": "text", "text": "answer"},
+        ]
+        assert _extract_text(parts) == "answer\nreason"
+
 
 class TestFinalAssistantText:
     def test_empty_messages(self):
@@ -86,15 +102,60 @@ class TestFinalAssistantText:
         ]
         assert _final_assistant_text(msgs) == "second"
 
-    def test_falls_back_to_last_any_text_when_no_assistant(self):
+    def test_returns_empty_when_no_assistant(self):
+        # Regression: the old code fell back to the user prompt here, which
+        # echoed the transcript (with [DISCORD_BOT]/[COMULYTIC_BRIDGE] tags)
+        # as the "response". The fix returns "" so the bridge posts a clear
+        # "no agent text output" diagnostic instead.
         msgs = [
             {"info": {"role": "user"}, "parts": [{"type": "text", "text": "only"}]},
         ]
-        assert _final_assistant_text(msgs) == "only"
+        assert _final_assistant_text(msgs) == ""
+
+    def test_picks_last_assistant_reasoning_only(self):
+        # An assistant message with only reasoning parts (no `text`) should
+        # yield the reasoning text — some models end after a `write` tool
+        # call with no final `text` part.
+        msgs = [
+            {"info": {"role": "user"}, "parts": [{"type": "text", "text": "q"}]},
+            {"info": {"role": "assistant"}, "parts": [{"type": "reasoning", "text": "summary"}]},
+        ]
+        assert _final_assistant_text(msgs) == "summary"
+
+    def test_ignores_user_when_assistant_has_no_text(self):
+        # A user message with text + an assistant message with only tool
+        # parts (no text/reasoning) should return "", NOT the user text.
+        # This is the core regression guard for the transcript-echo bug.
+        msgs = [
+            {"info": {"role": "user"}, "parts": [{"type": "text", "text": "the prompt"}]},
+            {"info": {"role": "assistant"}, "parts": [{"type": "tool", "tool": "write"}]},
+        ]
+        assert _final_assistant_text(msgs) == ""
 
     def test_skips_non_dict_entries(self):
         msgs = ["junk", {"info": {"role": "assistant"}, "parts": [{"type": "text", "text": "ok"}]}]
         assert _final_assistant_text(msgs) == "ok"
+
+
+class TestLooksLikePrompt:
+    def test_empty_returns_false(self):
+        assert _looks_like_prompt("") is False
+
+    def test_plain_text_returns_false(self):
+        assert _looks_like_prompt("a normal agent reply") is False
+
+    def test_discord_bot_tag_detected(self):
+        assert _looks_like_prompt("[DISCORD_BOT]\nhello") is True
+
+    def test_comulytic_bridge_tag_detected(self):
+        assert _looks_like_prompt("[COMULYTIC_BRIDGE]\nhello") is True
+
+    def test_both_tags_detected(self):
+        text = "[DISCORD_BOT]\n[COMULYTIC_BRIDGE]\n\nthe transcript"
+        assert _looks_like_prompt(text) is True
+
+    def test_tag_anywhere_in_text_detected(self):
+        assert _looks_like_prompt("some preamble\n[DISCORD_BOT]\nrest") is True
 
 
 class TestSlugifyPrompt:

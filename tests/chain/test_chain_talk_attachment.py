@@ -65,10 +65,10 @@ async def test_chain_talk_attachment_drives_session(
     # The opencode session was created.
     create_calls = [c for c in bot_instance.client.calls if c[0] == "create_session"]
     assert create_calls
-    # send_prompt_async was called with agent="plan-author".
+    # send_prompt_async was called with agent="oc-assistant".
     prompt_calls = [c for c in bot_instance.client.calls if c[0] == "send_prompt_async"]
     assert prompt_calls
-    assert prompt_calls[0][2]["agent"] == "plan-author"
+    assert prompt_calls[0][2]["agent"] == "oc-assistant"
     # A session channel was created in the guild.
     assert guild.created_channels
     # The final response was posted to the created channel.
@@ -125,7 +125,7 @@ async def test_chain_talk_attachment_speaker_id_variant(
         await bot_instance._run_talk_session(ctx, attachment, plan_type=None)
         prompt_calls = [c for c in bot_instance.client.calls if c[0] == "send_prompt_async"]
         assert prompt_calls
-        assert prompt_calls[0][2]["agent"] == "plan-author"
+        assert prompt_calls[0][2]["agent"] == "oc-assistant"
     finally:
         voice_mod._LOCAL_WHISPER_MODEL = None
         speakers_mod._SPEAKERS_CACHE = None

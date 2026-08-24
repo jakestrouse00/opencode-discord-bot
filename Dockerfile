@@ -32,7 +32,7 @@ COPY . /src/
 # so the venv is self-contained; we copy it wholesale into the runtime stage.
 # The `sed` strips the `force-include` line from pyproject.toml because newer
 # hatchling already includes non-.py files from `packages`, so the
-# force-include duplicates `agent/plan-author.md` and the wheel build fails
+# force-include duplicates `agent/oc-assistant.md` and the wheel build fails
 # with "A second file is being added to the wheel archive at the same path".
 # The `.md` file is still shipped (it's under `src/opencode_discord_bot/agent/`
 # which is in `packages`).

@@ -306,7 +306,7 @@ class OpencodeClient:
         behavior when both overrides are empty). Two separate config fields
         cover the two agent surfaces the bot uses: ``opencode_default_model``
         for ``agent=None`` (``/oc`` + plain-text follow-ups) and
-        ``opencode_plan_author_model`` for ``agent="plan-author"``
+        ``opencode_assistant_model`` for ``agent="oc-assistant"``
         (``/oc_plan`` / ``/oc_voice`` / ``/oc_talk`` / voice-message trigger /
         Comulytic bridge). Other agent names (custom agents, if any) fall
         under the default field too — there's no per-agent override beyond
@@ -320,8 +320,8 @@ class OpencodeClient:
         format stays as the convenient ``"providerID/modelID"`` string; the
         split is an internal detail of this client.
         """
-        if agent == "plan-author":
-            return config.opencode_plan_author_model or None
+        if agent == "oc-assistant":
+            return config.opencode_assistant_model or None
         return config.opencode_default_model or None
 
     @staticmethod
@@ -374,7 +374,7 @@ class OpencodeClient:
         `model` overrides the agent's frontmatter model for this one call; when
         ``model is None`` (the common case — callers don't pass it), it's
         resolved from config via ``_resolve_model`` so the bot's
-        ``OPENCODE_DEFAULT_MODEL`` / ``OPENCODE_PLAN_AUTHOR_MODEL`` env vars
+        ``OPENCODE_DEFAULT_MODEL`` / ``OPENCODE_ASSISTANT_MODEL`` env vars
         flow through transparently. The resolved ``"providerID/modelID"``
         string is converted to the ``{"providerID", "modelID"}`` object the
         opencode server expects (see ``_model_ref``); the ``model`` key is
@@ -409,7 +409,7 @@ class OpencodeClient:
         `model` overrides the agent's frontmatter model for this one call; when
         ``model is None`` (the common case — callers don't pass it), it's
         resolved from config via ``_resolve_model`` so the bot's
-        ``OPENCODE_DEFAULT_MODEL`` / ``OPENCODE_PLAN_AUTHOR_MODEL`` env vars
+        ``OPENCODE_DEFAULT_MODEL`` / ``OPENCODE_ASSISTANT_MODEL`` env vars
         flow through transparently. The resolved ``"providerID/modelID"``
         string is converted to the ``{"providerID", "modelID"}`` object the
         opencode server expects (see ``_model_ref``); the ``model`` key is
