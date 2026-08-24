@@ -11,7 +11,9 @@ in that channel are forwarded as follow-up prompts.
 Want an AI agent to install and configure this bot for you? Copy the
 prompt below into your LLM (opencode, Claude, ChatGPT, Cursor, etc.). It
 walks the agent through the whole setup end-to-end, deferring the manual
-Discord Developer Portal steps to you.
+Discord Developer Portal steps to you. The steps are host-agnostic — run
+the bot locally for a quick start, or adapt them to your container host
+of choice (see "Deploy in a container" below).
 
 ```
 Install and set up the opencode-discord-bot project on my machine from
@@ -316,6 +318,80 @@ Encryption) protocol on modern voice channels — `/oc_voice` recording does
 not currently work, and a replacement voice-capture solution is being sought.
 The text commands, TTS, STT, and session routing are unaffected. See
 `SETUP_GUIDE.md` "/oc_voice recording (broken)" for context.
+
+## Deploy in a container
+
+For long-running hosting (so the bot stays connected to the Discord
+gateway without keeping a local terminal open), run it in a container.
+This repo ships the files you need, designed for any container host that
+supports a persistent volume + an entrypoint script:
+
+| File | Purpose |
+|---|---|
+| `Dockerfile` | Two-stage build: installs the bot + its Python deps into a venv, then a slim runtime image with `ffmpeg` (the voice pipeline imports at module top, so ffmpeg must be present) |
+| `fly.toml` | Example app config (machine size, persistent volume mount, build/dockerfile) — adapt to your host |
+| `fly.env.example` | Template for the non-secret `.env` that lives on the persistent volume |
+| `start.sh` | Container entrypoint: joins a Tailscale tailnet (if `TAILSCALE_AUTHKEY` is set), seeds `/data/.env` from the template on first boot, then `exec`s the bot from `/data` |
+| `.dockerignore` | Keeps the Docker build context lean (excludes `.venv`, `Speakers/`, `tests/`, local state) |
+
+### Key design choices (portable across hosts)
+
+- **Outbound-only.** The bot has no inbound ports — it connects out to
+  the Discord gateway (WebSocket), your `opencode serve` instance, the
+  Comulytic API, and (optionally) OpenAI. No `EXPOSE` / no public ingress
+  is needed. Most container hosts work out of the box.
+- **No in-container `opencode serve` (by default).** The Dockerfile does
+  NOT install the `opencode` binary. Instead, set
+  `OPENCODE_SERVE_ENABLED=false` + `OPENCODE_SERVER_URL=http://<your-opencode-serve>:4097`
+  so the bot talks to an `opencode serve` running elsewhere (your desktop,
+  a separate machine, another container). To run a self-contained server
+  in the same container instead, install `opencode` in the Dockerfile
+  (`RUN npm install -g opencode-ai`) and set `OPENCODE_SERVE_ENABLED=true`.
+- **Persistent volume at `/data`.** The bot writes `.env`,
+  `.opencode-discord-bot-sessions.json`, `.opencode-discord-bridge-sessions.json`,
+  `.comulytic-seen.json`, and the faster-whisper model cache here.
+  Without a persistent volume these are lost on every restart — follow-ups
+  break, the bridge re-processes every recording, and the Whisper model
+  re-downloads every boot. Mount a volume at `/data` (and set
+  `HF_HOME=/data/hf-cache` to cache the Whisper model on it).
+- **Secrets vs `.env`.** Put sensitive values (bot token, server
+  password, API keys) in your host's secret manager (env vars that
+  override `.env` in pydantic-settings). Put non-sensitive runtime config
+  + the guild-specific IDs in `/data/.env` so `/oc_setup` can write them
+  at runtime. The guild IDs (`DISCORD_BOT_GUILD_ID`,
+  `DISCORD_BOT_SESSION_CATEGORY_ID`, `DISCORD_BOT_ALLOWED_CHANNEL_IDS`,
+  `VOICE_MESSAGE_TRIGGER_CHANNEL_ID`) MUST be in the `.env` file, NOT
+  secrets — env vars shadow `.env` and `/oc_setup`'s atomic write would
+  be silently ignored.
+- **No auto-stop.** The bot must stay connected to the Discord gateway to
+  receive slash commands + plain-text follow-ups in real time. Disable any
+  "scale to zero" / auto-stop feature your host provides.
+- **Machine size.** ~2GB RAM is comfortable (faster-whisper `base` model +
+  the bot + Pycord + the Comulytic bridge + httpx). 1GB is tight when the
+  bridge + a Whisper transcription run concurrently. The bot is I/O-bound
+  (gateway + HTTP polling), not CPU-bound except during transcription.
+- **What's NOT in the image:** the `opencode` binary (remote serve), the
+  `speakers` extra (pyannote.audio + torch, ~1-2GB — speaker ID degrades
+  to anonymous STT; set `SPEAKER_ID_ENABLED=false`), and TTS
+  (`VOICE_TTS_ENABLED=false` — TTS is for `/oc_voice` playback, which is
+  DAVE-broken). ffmpeg IS installed.
+
+### First-run flow (any host)
+
+1. Set secrets (token, server password, server URL,
+   `OPENCODE_SERVE_ENABLED=false`, any API keys). If using Tailscale to
+   reach a remote `opencode serve`, set `TAILSCALE_AUTHKEY`.
+2. Deploy the image + mount a persistent volume at `/data`.
+3. On first boot `start.sh` seeds `/data/.env` from `fly.env.example`.
+   Re-seed manually if needed: copy the template to `/data/.env`.
+4. Sync slash commands (the bot does NOT auto-sync on startup):
+   `python -m opencode_discord_bot.sync_commands --guild <guild id>`
+   (run inside the container, from `/data`).
+5. In Discord, invoke `/oc_setup` (requires the Manage Channels
+   permission) — it creates the "OpenCode Sessions" category +
+   `voice-recordings` + `bot-commands` channels and writes their IDs to
+   `/data/.env`. Then stop, re-sync commands, and restart so every
+   command is registered.
 
 ## Install as an opencode skill
 

@@ -67,6 +67,108 @@ control bot.
   The only other automated check is the Python import sanity check:
   `python -c "from opencode_discord_bot.commands import OpencodeBot; print('ok')"`.
 
+## Deployment (Fly.io)
+
+This is the production deployment the project is developed against. The
+bot runs on **Fly.io** as an outbound-only container — it has no inbound
+ports and connects out to the Discord gateway, Tailscale's coordination
+servers, the user's desktop `opencode serve` over a private Tailscale
+tunnel, the Comulytic API, and (optionally) OpenAI. The deployment files
+live at the repo root: `Dockerfile`, `fly.toml`, `fly.env.example`,
+`start.sh`, `.dockerignore`.
+
+- **No in-container `opencode serve`.** The bot's local default
+  (`OPENCODE_SERVE_ENABLED=true`) auto-spawns `opencode serve` as a child
+  process — NOT used on Fly. The deploy sets `OPENCODE_SERVE_ENABLED=false`
+  + `OPENCODE_SERVER_URL=http://<desktop-tailscale-ip>:4097` (a Fly secret)
+  so the bot talks to the user's **desktop** `opencode serve` over a
+  Tailscale tunnel. The `opencode` binary is intentionally NOT installed in
+  the image. To run a self-contained server in-container instead, install
+  opencode in the Dockerfile and flip `OPENCODE_SERVE_ENABLED=true`.
+- **Tailscale in the image.** The Dockerfile copies `tailscaled` +
+  `tailscale` from the official Tailscale image; `start.sh` starts the
+  daemon, joins the tailnet (`tailscale up --auth-key=$TAILSCALE_AUTHKEY
+  --hostname=discord-bot --accept-routes`), then launches the bot. The
+  Tailscale auth key should be **reusable + ephemeral + pre-authorized**
+  (ephemeral = the node auto-removes from the tailnet when the machine
+  stops, keeping the tailnet clean). Daemon state persists at
+  `/data/tailscaled.state` so the node identity is stable across restarts.
+  Tailscale is the reason the desktop `opencode serve` (not exposed to the
+  public internet) is reachable from the container.
+- **Persistent volume at `/data`** (Fly `[[mounts]] source="bot_data"
+  destination="/data"`). Holds: `.env` (written by `/oc_setup`),
+  `.opencode-discord-bot-sessions.json`, `.opencode-discord-bridge-sessions.json`,
+  `.comulytic-seen.json`, the faster-whisper model cache
+  (`HF_HOME=/data/hf-cache`), and `tailscaled.state`. `WORKDIR /data` +
+  `start.sh` `cd /data` so pydantic-settings finds `.env` (cwd-relative) and
+  the router/seen-set files land on the volume. Without the volume, all of
+  this is lost on every restart — follow-ups break, the bridge re-processes
+  every Comulytic recording, and the Whisper model re-downloads.
+- **Secrets vs `.env` split (load-bearing).** Sensitive values are Fly
+  secrets (`flyctl secrets set`) — env vars that override `.env` in
+  pydantic-settings: `DISCORD_BOT_TOKEN`, `OPENCODE_SERVER_PASSWORD`,
+  `OPENCODE_SERVER_URL`, `OPENCODE_SERVE_ENABLED`, `TAILSCALE_AUTHKEY`,
+  `COMULYTIC_JWT`/`COMULYTIC_REFRESH_TOKEN`, `OPENAI_API_KEY`,
+  `OLLAMA_AUTH_KEY`. Non-sensitive runtime config + the guild-specific IDs
+  live in `/data/.env` (seeded from `fly.env.example` on first boot via
+  `start.sh`). The guild IDs (`DISCORD_BOT_GUILD_ID`,
+  `DISCORD_BOT_SESSION_CATEGORY_ID`, `DISCORD_BOT_ALLOWED_CHANNEL_IDS`,
+  `VOICE_MESSAGE_TRIGGER_CHANNEL_ID`) MUST be in `.env`, NOT Fly secrets —
+  env vars shadow `.env` and `/oc_setup`'s atomic write would be silently
+  ignored, so the IDs would never persist. `/oc_setup` writes them to
+  `/data/.env` at runtime.
+- **Machine:** 2GB RAM, `shared-cpu-1x`, 1 CPU (see `fly.toml [[vm]]`).
+  faster-whisper `base` (~140MB model, ~500MB RSS at load) + the bot +
+  Pycord + the Comulytic bridge + httpx clients. 1GB is tight when the
+  bridge + a Whisper transcription run concurrently; 2GB is comfortable.
+  The bot is I/O-bound (Discord gateway + HTTP polling), not CPU-bound
+  except during transcription. **No auto-stop/autostart** — the bot must
+  stay connected to the Discord gateway to receive slash commands +
+  plain-text follow-ups in real time, so Fly's auto-stop is NOT used.
+- **What's NOT in the image:** the `opencode` binary (remote serve over
+  Tailscale instead), the `speakers` extra (pyannote.audio + torch,
+  ~1-2GB — speaker ID degrades to anonymous STT, so
+  `SPEAKER_ID_ENABLED=false`), and TTS (`VOICE_TTS_ENABLED=false` — TTS is
+  for `/oc_voice` playback, which is DAVE-broken). ffmpeg IS installed
+  (the bot imports the voice pipeline unconditionally at module top, so
+  ffmpeg must be present to avoid import-time failures).
+- **Dockerfile `sed` quirk:** the builder stage runs
+  `sed -i '/^force-include = /d' /src/pyproject.toml` because newer
+  hatchling already includes non-`.py` files from `packages`, so the
+  `force-include` line in `pyproject.toml` duplicates
+  `agent/plan-author.md` and the wheel build fails with "A second file is
+  being added to the wheel archive at the same path". The `.md` agent file
+  is still shipped (it's under `src/opencode_discord_bot/agent/` which is in
+  `packages`). Do NOT remove the `sed` without also removing the
+  `force-include` line from `pyproject.toml`.
+- **Deploy + first-run flow:**
+  1. `flyctl secrets set DISCORD_BOT_TOKEN=... OPENCODE_SERVER_PASSWORD=...
+     OPENCODE_SERVER_URL=http://<desktop-tailscale-ip>:4097
+     OPENCODE_SERVE_ENABLED=false TAILSCALE_AUTHKEY=tskey-...` (+ optional
+     `COMULYTIC_*`, `OPENAI_API_KEY`, `OLLAMA_AUTH_KEY`, voice settings).
+  2. `flyctl deploy` (builds the Dockerfile, provisions the `bot_data`
+     volume on first deploy).
+  3. First boot: `start.sh` seeds `/data/.env` from `fly.env.example`.
+  4. `flyctl ssh console -C "cp /app/fly.env.example /data/.env"` if a
+     re-seed is ever needed (the template is copied into the image at
+     `/app/fly.env.example`).
+  5. Sync slash commands:
+     `flyctl ssh console -C "cd /data && /venv/bin/python -m opencode_discord_bot.sync_commands --guild <id>"`
+     (the bot does NOT auto-sync on startup).
+  6. Start/restart the machine so the bot runs. In Discord, invoke
+     `/oc_setup` (requires Manage Channels) — it creates the "OpenCode
+     Sessions" category + `voice-recordings` + `bot-commands` channels and
+     writes their IDs + the guild id to `/data/.env`.
+  7. Stop, re-sync commands (so every command is registered now that
+     `/oc_setup` has written the guild config), restart.
+- **`OPENCODE_SERVE_CWD` on Fly:** not set — the bot does NOT spawn
+  `opencode serve` on Fly (`OPENCODE_SERVE_ENABLED=false`), so the serve
+  CWD is irrelevant to the container. The desktop `opencode serve` the bot
+  talks to runs in the user's project directory on their desktop (where
+  `.opencode/` lives); the bundled `plan-author` agent must be installed
+  there (`python -m opencode_discord_bot.install_agent --dest <desktop
+  project root>`), not in the container.
+
 ## Architecture
 
 - **Package layout:** `src/opencode_discord_bot/` (pip-installable, importable

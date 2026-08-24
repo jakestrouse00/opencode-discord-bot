@@ -1,0 +1,87 @@
+# fly.toml — opencode-discord-bot on Fly.io
+#
+# The bot runs on Fly.io and connects to the user's desktop opencode serve
+# over a Tailscale tunnel (OPENCODE_SERVER_URL=http://<desktop-tailscale-ip>:4097,
+# OPENCODE_SERVE_ENABLED=false). No inbound ports — the bot is outbound-only
+# (Discord gateway, Tailscale, opencode serve, Comulytic API, optional OpenAI).
+#
+# Secrets (set via `flyctl secrets set`, NOT in this file):
+#
+# Required:
+#   DISCORD_BOT_TOKEN         — Discord bot token
+#   OPENCODE_SERVER_PASSWORD  — must match the desktop's opencode serve
+#   OPENCODE_SERVER_URL       — http://<desktop-tailscale-ip>:4097
+#   OPENCODE_SERVE_ENABLED    — false (do NOT auto-spawn opencode serve in-container)
+#   TAILSCALE_AUTHKEY         — tskey-... (reusable + ephemeral + pre-authorized)
+#
+# Voice (local faster-whisper in-container):
+#   VOICE_STT_PROVIDER        — local
+#   VOICE_LOCAL_WHISPER_MODEL — base (~140MB, CPU-feasible)
+#   WHISPER_MODEL             — base
+#   WHISPER_DEVICE            — cpu
+#   WHISPER_COMPUTE_TYPE      — int8
+#   VOICE_TTS_ENABLED         — false (TTS is for /oc_voice playback, which is DAVE-broken)
+#   HF_HOME                   — /data/hf-cache (persist Whisper model on the volume)
+#
+# Speaker ID (NOT installed in the image — disable to avoid warning spam):
+#   SPEAKER_ID_ENABLED        — false (pyannote.audio not in the Docker image)
+#
+# Comulytic bridge (if enabled):
+#   COMULYTIC_ENABLED         — true
+#   COMULYTIC_JWT             — <150-day access JWT>
+#   COMULYTIC_REFRESH_TOKEN   — <365-day refresh JWT>
+#
+# Optional:
+#   OPENAI_API_KEY            — only if VOICE_STT_PROVIDER=openai or auto
+#   OLLAMA_AUTH_KEY           — only if you want LLM channel-name slugs
+#
+# DO NOT set as Fly secrets (they break /oc_setup's .env write on the volume
+# because pydantic-settings env vars shadow .env file values):
+#   DISCORD_BOT_GUILD_ID            — pass via `sync_commands --guild <id>` instead;
+#                                     /oc_setup writes it to /data/.env at runtime
+#   DISCORD_BOT_SESSION_CATEGORY_ID — written by /oc_setup to /data/.env
+#   VOICE_MESSAGE_TRIGGER_CHANNEL_ID — written by /oc_setup to /data/.env
+#   DISCORD_BOT_ALLOWED_CHANNEL_IDS  — written by /oc_setup to /data/.env
+#
+# See the deploy plan in .opencode/plans/ for the full step-by-step.
+
+app = "opencode-discord-bot"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+# 2GB RAM: faster-whisper `base` (~140MB model, ~500MB RSS at load) + the bot
+# + Pycord + the Comulytic bridge + httpx clients. 1GB is tight when the
+# bridge + a Whisper transcription run concurrently; 2GB is comfortable.
+# shared-cpu-1x is plenty — the bot is I/O-bound (Discord gateway + HTTP
+# polling), not CPU-bound except during transcription.
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory = "2gb"
+
+# Persistent volume for:
+#   .env                              (written by /oc_setup via env_writer)
+#   .opencode-discord-bot-sessions.json  (SessionRouter channel->session bindings)
+#   .opencode-discord-bridge-sessions.json (bridge SessionRouter)
+#   .comulytic-seen.json              (bridge seen-set)
+#   hf-cache/                         (faster-whisper model cache, HF_HOME=/data/hf-cache)
+#   tailscaled.state                  (Tailscale daemon state)
+# Without the volume, all of this is lost on every machine restart — follow-up
+# messages break, the bridge re-processes every Comulytic recording, and the
+# Whisper model re-downloads on first transcription.
+[[mounts]]
+  source = "bot_data"
+  destination = "/data"
+
+# No [[services]] block — the bot has no inbound ports. It connects outbound
+# to the Discord gateway (wss://gateway.discord.gg), Tailscale coordination
+# servers, the user's desktop opencode serve (over Tailscale), and optionally
+# the Comulytic API + OpenAI. Fly's auto-stop/autostart is NOT used (the bot
+# must stay connected to the Discord gateway to receive slash commands +
+# plain-text follow-ups in real time).
+
+# No [metrics] block — the bot has no HTTP server (it's a Discord gateway
+# client, not a web server). Fly logs are the observability surface
+# (`flyctl logs`). The bot logs to stderr in a structured format.

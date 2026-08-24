@@ -1,0 +1,54 @@
+# Keep the Docker build context lean. The Dockerfile COPYs the whole repo
+# root (opencode-discord-bot/) into the builder stage as /src, so anything
+# not excluded here ships to the builder. Binary + large dirs bloat the
+# context upload + can confuse the build.
+
+# Python virtualenv (if a local .venv exists for development) — never ship.
+.venv/
+venv/
+
+# Speaker reference audio (binary, large, out of scope for the Fly deploy —
+# speaker ID is not installed in the image). If you later add the `speakers`
+# extra to the Dockerfile, re-include Speakers/ here.
+Speakers/
+
+# Tests + fixtures — not needed at runtime.
+tests/
+
+# Local runtime state (gitignored, but be explicit in case of a stray file).
+.env
+.env.local
+.opencode-discord-bot.lock
+.opencode-discord-bot-sessions.json
+.opencode-discord-bridge-sessions.json
+.comulytic-seen.json
+screen_frames/
+
+# Git + IDE + OS cruft.
+.git/
+.gitignore
+.gitattributes
+.idea/
+.vscode/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Docs that aren't needed in the image (they're in the repo for humans).
+# Keep AGENTS.md + README.md + .env.example since they're small + useful for
+# in-container debugging; exclude the long SETUP_GUIDE.md.
+SETUP_GUIDE.md
+
+# The Dockerfile + fly.toml + start.sh + this file are read by the builder,
+# not needed inside the image, but excluding them is harmless and keeps the
+# context small.
+Dockerfile
+fly.toml
+.dockerignore
+
+# Fly + opencode local artifacts.
+fly.toml.bak
