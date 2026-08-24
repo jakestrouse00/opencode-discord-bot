@@ -61,12 +61,17 @@ primary_region = "iad"
 # a healthy ~2.7GB cushion at the observed peak and covers the concurrency
 # window now that the voice.py transcription path runs off the event loop
 # (previously it blocked the loop, implicitly serializing transcriptions;
-# that bug is fixed, so concurrent transcriptions are now possible). shared-cpu-1x
-# is plenty — the bot is I/O-bound (Discord gateway + HTTP polling), not
-# CPU-bound except during transcription.
+# that bug is fixed, so concurrent transcriptions are now possible).
+#
+# 2 shared CPUs (not 1): Fly caps memory at 2gb * shared-CPU-count, so 1
+# shared CPU caps at 2gb (2048 MiB) — requesting cpus=1 + memory=4gb is an
+# invalid combo Fly rejects with "cannot exceed 2048 MiB". 2 shared CPUs
+# raises the cap to 4gb. The bot is I/O-bound (Discord gateway + HTTP
+# polling), not CPU-bound except during transcription, so the second shared
+# CPU is cheap headroom — it's here to unlock the 4gb memory, not for compute.
 [[vm]]
   cpu_kind = "shared"
-  cpus = 1
+  cpus = 2
   memory = "4gb"
 
 # Persistent volume for:
