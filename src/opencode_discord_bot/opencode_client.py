@@ -24,7 +24,7 @@ which owns the reconnect/backoff loop. Note: the Discord bot no longer uses
 the SSE stream; it polls `GET /session/status` via `get_session_status` (see
 `opencode_discord_bot.events.poll_until_idle`) because the v2 SSE wire format
 proved fragile to parse. `stream_events` is retained for other potential
-consumers.
+consumers but its v1 parser is known-stale against v2 (see its docstring).
 """
 
 from __future__ import annotations
@@ -106,20 +106,30 @@ class OpencodeClient:
     def __init__(self, *, base_url: str | None = None) -> None:
         self._base_url = base_url or config.opencode_server_url
         self._client: httpx.AsyncClient | None = None
+        # Guards lazy `httpx.AsyncClient` construction so two concurrent
+        # `_ac()` awaits don't each build a client (the loser's would leak).
+        # Mirrors `opencode-rest-client`'s `client.py`.
+        self._client_lock: asyncio.Lock = asyncio.Lock()
 
     async def _ac(self) -> httpx.AsyncClient:
         if self._client is None:
-            self._client = httpx.AsyncClient(
-                base_url=self._base_url,
-                auth=_auth(),
-                # `read=60` bounds how long a single REST read may stall —
-                # without it a hung server would block the pollers
-                # indefinitely. The SSE stream (`stream_events`) overrides
-                # this per-request with `timeout=None` since it's a long-lived
-                # connection.
-                timeout=httpx.Timeout(connect=10.0, read=60.0, write=30.0, pool=30.0),
-                headers={"Accept": "application/json"},
-            )
+            async with self._client_lock:
+                # Double-checked locking: a second awaiter that entered the
+                # lock after the first built the client must not rebuild it.
+                if self._client is None:
+                    self._client = httpx.AsyncClient(
+                        base_url=self._base_url,
+                        auth=_auth(),
+                        # `read=60` bounds how long a single REST read may stall —
+                        # without it a hung server would block the pollers
+                        # indefinitely. The SSE stream (`stream_events`) overrides
+                        # this per-request with `timeout=None` since it's a long-lived
+                        # connection.
+                        timeout=httpx.Timeout(
+                            connect=10.0, read=60.0, write=30.0, pool=30.0
+                        ),
+                        headers={"Accept": "application/json"},
+                    )
         return self._client
 
     async def aclose(self) -> None:
@@ -129,7 +139,25 @@ class OpencodeClient:
 
     # --- low-level helpers ---
 
-    async def _request(self, method: str, path: str, **kw: Any) -> Any:
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        directory: str | None = None,
+        **kw: Any,
+    ) -> Any:
+        # Optional multi-project routing: when directory is set, inject the
+        # x-opencode-directory request header so opencode's workspace-routing
+        # middleware resolves the session to that project dir instead of the
+        # server's process.cwd(). Mirrors opencode-rest-client's client.py.
+        # No call site in the bot passes directory today (the bot pins the
+        # project via OPENCODE_SERVE_CWD), so this is forward-compatible and
+        # a no-op when None.
+        if directory is not None:
+            headers = dict(kw.get("headers") or {})
+            headers["x-opencode-directory"] = directory
+            kw["headers"] = headers
         client = await self._ac()
         # Idempotent GETs get a small retry on transient transport errors or
         # 5xx responses — a single blip from the opencode server shouldn't
@@ -184,30 +212,47 @@ class OpencodeClient:
 
     # --- sessions ---
 
-    async def list_sessions(self) -> list[dict]:
+    async def list_sessions(
+        self, *, directory: str | None = None
+    ) -> list[dict]:
         """GET /session — all sessions."""
-        return await self._request("GET", "/session")
+        result = await self._request("GET", "/session", directory=directory)
+        return result if isinstance(result, list) else []
 
-    async def create_session(self, title: str | None = None) -> dict:
+    async def create_session(
+        self, title: str | None = None, *, directory: str | None = None
+    ) -> dict:
         """POST /session — body `{ title? }`, returns the new session."""
         body: dict = {}
         if title:
             body["title"] = title
-        return await self._request("POST", "/session", json=body)
+        return await self._request("POST", "/session", json=body, directory=directory)
 
-    async def get_session(self, sid: str) -> dict:
+    async def get_session(
+        self, sid: str, *, directory: str | None = None
+    ) -> dict:
         """GET /session/{id} — session details."""
-        return await self._request("GET", f"/session/{sid}")
+        return await self._request("GET", f"/session/{sid}", directory=directory)
 
-    async def delete_session(self, sid: str) -> bool:
+    async def delete_session(
+        self, sid: str, *, directory: str | None = None
+    ) -> bool:
         """DELETE /session/{id} — returns bool."""
-        return bool(await self._request("DELETE", f"/session/{sid}"))
+        return bool(
+            await self._request("DELETE", f"/session/{sid}", directory=directory)
+        )
 
-    async def abort_session(self, sid: str) -> bool:
+    async def abort_session(
+        self, sid: str, *, directory: str | None = None
+    ) -> bool:
         """POST /session/{id}/abort — abort a running session, returns bool."""
-        return bool(await self._request("POST", f"/session/{sid}/abort"))
+        return bool(
+            await self._request("POST", f"/session/{sid}/abort", directory=directory)
+        )
 
-    async def revert_session(self, sid: str, message_id: str) -> dict:
+    async def revert_session(
+        self, sid: str, message_id: str, *, directory: str | None = None
+    ) -> dict:
         """POST /session/{id}/revert — revert to a user message, returns session.
 
         Body ``{"messageID": message_id}`` reverts the session to before the
@@ -224,6 +269,7 @@ class OpencodeClient:
             "POST",
             f"/session/{sid}/revert",
             json={"messageID": message_id},
+            directory=directory,
         )
 
     async def get_session_status(self) -> dict[str, dict]:
@@ -240,12 +286,16 @@ class OpencodeClient:
 
     # --- messages ---
 
-    async def list_messages(self, sid: str, limit: int | None = None) -> list[dict]:
+    async def list_messages(
+        self, sid: str, limit: int | None = None, *, directory: str | None = None
+    ) -> list[dict]:
         """GET /session/{id}/message — `{ info, parts }[]`."""
         params: dict = {}
         if limit is not None:
             params["limit"] = limit
-        return await self._request("GET", f"/session/{sid}/message", params=params)
+        return await self._request(
+            "GET", f"/session/{sid}/message", params=params, directory=directory
+        )
 
     def _resolve_model(self, agent: str | None) -> str | None:
         """Pick the model to send for a prompt, based on the agent + config.
@@ -308,6 +358,8 @@ class OpencodeClient:
         parts: list[dict],
         agent: str | None = None,
         model: str | None = None,
+        *,
+        directory: str | None = None,
     ) -> dict:
         """POST /session/{id}/message — synchronous wait for full response.
 
@@ -335,7 +387,9 @@ class OpencodeClient:
         model_ref = self._model_ref(resolved_model)
         if model_ref is not None:
             body["model"] = model_ref
-        return await self._request("POST", f"/session/{sid}/message", json=body)
+        return await self._request(
+            "POST", f"/session/{sid}/message", json=body, directory=directory
+        )
 
     async def send_prompt_async(
         self,
@@ -343,6 +397,8 @@ class OpencodeClient:
         parts: list[dict],
         agent: str | None = None,
         model: str | None = None,
+        *,
+        directory: str | None = None,
     ) -> None:
         """POST /session/{id}/prompt_async — fire-and-forget (204 No Content).
 
@@ -366,7 +422,9 @@ class OpencodeClient:
         model_ref = self._model_ref(resolved_model)
         if model_ref is not None:
             body["model"] = model_ref
-        await self._request("POST", f"/session/{sid}/prompt_async", json=body)
+        await self._request(
+            "POST", f"/session/{sid}/prompt_async", json=body, directory=directory
+        )
 
     # --- questions ---
 
@@ -433,9 +491,12 @@ class OpencodeClient:
     # Not used by the bot itself (the bot never enumerates opencode agents);
     # part of the typed REST surface for external consumers.
 
-    async def list_agents(self) -> list[dict]:
+    async def list_agents(
+        self, *, directory: str | None = None
+    ) -> list[dict]:
         """GET /agent — all available agents (default + plan + custom)."""
-        return await self._request("GET", "/agent")
+        result = await self._request("GET", "/agent", directory=directory)
+        return result if isinstance(result, list) else []
 
     # --- events (SSE) ---
 
@@ -450,6 +511,20 @@ class OpencodeClient:
         — it is NOT retried. The caller owns the reconnect/backoff loop. Raises `OpencodeError` if the connection fails to
         establish; `httpx.RemoteProtocolError` / `httpx.ReadError` surface to
         the caller if the stream drops mid-iteration.
+
+        .. deprecated::
+            The v1 ``{type, properties}`` parser here is known-stale against
+            opencode's v2 SSE wire format (``{id, type, data}`` with the event
+            type in the JSON body, not the SSE ``event:`` line, which is
+            always ``"message"``). On v2 servers the parser silently skips
+            every event, so the idle signal is never observed and a consumer
+            relying on this for completion would hang forever. The Discord
+            bot abandoned SSE for this reason and polls
+            ``get_session_status`` via ``events.poll_until_idle`` instead
+            (see ``events.py:7-15``). This method is retained only for
+            external consumers and should NOT be relied on for idle
+            detection; use ``poll_until_idle`` as the authoritative path.
+            A v2 parser rewrite is out of scope until a real consumer needs it.
         """
         client = await self._ac()
         async with client.stream(
