@@ -297,6 +297,36 @@ All settings are env vars (uppercase of the field name) or entries in a
 After `/oc` or `/oc_plan` creates a session channel, any plain-text message in
 that channel is forwarded as a follow-up prompt to the bound opencode session.
 
+## Session monitor (optional, read-only)
+
+When opencode is running a long task on your **desktop**, the session
+monitor posts a Discord embed per event so you can step away and still know
+when to come back — to approve a permission, answer a question, or pick up
+a finished session. **Read-only**: the monitor never approves, answers, or
+aborts anything; it only posts embeds.
+
+| Event | Embed |
+|---|---|
+| A desktop session is waiting on a **permission** | 🔐 red — permission name, matched patterns, metadata |
+| A desktop session is waiting on a **question** | ❓ orange — question header, options, multi-select/custom tags |
+| A watched desktop session **completed** | ✅ green — ~300-char snippet of the final response |
+
+Sessions already bound to a Discord channel (`/oc`, `/oc_plan`, bridge
+channels) are excluded — they already notify in their own channels.
+Sessions idle when the bot starts are never notified (no restart spam).
+
+| Variable | Default | Description |
+|---|---|---|
+| `MONITOR_ENABLED` | `false` | Master switch (the monitor never starts unless this is `true`) |
+| `MONITOR_CHANNEL_ID` | `1544715093491847249` | The channel the embeds go to |
+| `MONITOR_USER_ID` | `0` | Your Discord user id — @mentioned in each embed's content so your phone buzzes (0 = no mention) |
+| `MONITOR_POLL_INTERVAL_SECONDS` | `10` | Poll cadence for the status/question/permission GETs |
+
+On Fly, the monitor watches your desktop `opencode serve` over the same
+Tailscale tunnel the rest of the bot uses. Set
+`MONITOR_ENABLED=true MONITOR_USER_ID=<your id>` as Fly secrets (or in
+`/data/.env` — none of the monitor vars are sensitive).
+
 ## Dashboard (optional, token-gated)
 
 The bot can serve an in-process ops dashboard for watching + controlling the

@@ -37,6 +37,17 @@ import discord
 from discord import ui
 
 from opencode_discord_bot.opencode_client import OpencodeClient, OpencodeError
+from opencode_discord_bot.text_utils import (
+    _fmt_options as _tu_fmt_options,
+)
+from opencode_discord_bot.text_utils import (
+    permission_block as _tu_permission_block,
+)
+from opencode_discord_bot.text_utils import (
+    question_block as _tu_question_block,
+)
+from opencode_discord_bot.text_utils import permission_block as _permission_block
+from opencode_discord_bot.text_utils import question_block as _question_block
 
 if TYPE_CHECKING:
     from opencode_discord_bot.voice import VoiceSession
@@ -77,56 +88,33 @@ class CustomAnswerModal(ui.Modal):
 
 
 def _fmt_options(options: list[dict], limit: int = 10) -> str:
-    """Render an option list as a numbered text block for the message body."""
-    lines = []
-    for i, opt in enumerate(options[:limit], 1):
-        label = opt.get("label", "?")
-        desc = opt.get("description", "")
-        lines.append(f"**{i}.** {label}" + (f" — {desc}" if desc else ""))
-    if len(options) > limit:
-        lines.append(f"_(+{len(options) - limit} more, see menu)_")
-    return "\n".join(lines)
+    """Render an option list as a numbered text block (deprecated local shim).
+
+    The implementation lives in `text_utils._fmt_options` (the Pycord-free
+    shared module) so the session monitor renders identical blocks; this
+    alias keeps the historical module-local name working for any callers.
+    """
+    return _tu_fmt_options(options, limit)
 
 
 def _question_block(info: dict) -> str:
-    """Render one Question.Info as a header + options text block."""
-    header = info.get("header", info.get("question", "Question"))
-    multi = info.get("multiple") is True
-    custom = info.get("custom") is not False
-    out = [f"**{header}**"]
-    if info.get("question"):
-        out.append(f"> {info['question']}")
-    if info.get("options"):
-        out.append(_fmt_options(info["options"]))
-    tags = []
-    if multi:
-        tags.append("multi-select")
-    if custom:
-        tags.append("custom allowed")
-    if tags:
-        out.append(f"_({', '.join(tags)})_")
-    return "\n".join(out)
+    """Render one Question.Info as a header + options text block.
+
+    Delegates to `text_utils.question_block` — the single source of truth
+    (also used by the session monitor). Kept as a module-local alias so the
+    existing call sites in this file are unchanged.
+    """
+    return _tu_question_block(info)
 
 
 def _permission_block(request: dict) -> str:
-    """Render a permission request as a header + patterns + metadata block."""
-    perm = request.get("permission", "?")
-    patterns = request.get("patterns") or []
-    out = [f"**Permission: {perm}**"]
-    if patterns:
-        joined = ", ".join(f"`{p}`" for p in patterns)
-        out.append(f"Matching: {joined}")
-    meta = request.get("metadata") or {}
-    if meta:
-        meta_lines = [f"- `{k}`: {v}" for k, v in meta.items() if v is not None]
-        if meta_lines:
-            out.append("Metadata:\n" + "\n".join(meta_lines))
-    if perm == "doom_loop":
-        out.append(
-            ":warning: The agent appears stuck in a loop. Approving lets it "
-            "continue; rejecting cancels the looping tool."
-        )
-    return "\n".join(out)
+    """Render a permission request as a header + patterns + metadata block.
+
+    Delegates to `text_utils.permission_block` — the single source of truth
+    (also used by the session monitor). Kept as a module-local alias so the
+    existing call sites in this file are unchanged.
+    """
+    return _tu_permission_block(request)
 
 
 class QuestionView(ui.View):

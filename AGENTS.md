@@ -114,7 +114,11 @@ root: `Dockerfile`, `fly.toml`, `fly.env.example`, `start.sh`,
   `OLLAMA_AUTH_KEY`, and the dashboard pair `DASHBOARD_ENABLED=true` +
   `DASHBOARD_TOKEN=<random>` (the dashboard only starts when BOTH are set;
   `DASHBOARD_TOKEN` must be a long random string — every dashboard request
-  must present it). Non-sensitive runtime config + the guild-specific IDs
+  must present it), and the session-monitor pair `MONITOR_ENABLED=true` +
+  `MONITOR_USER_ID=<your discord id>` (the monitor only starts when BOTH
+  `MONITOR_ENABLED` and `MONITOR_CHANNEL_ID` are set; the channel id is a
+  non-secret default so it can stay in `/data/.env`). Non-sensitive runtime
+  config + the guild-specific IDs
   live in `/data/.env` (seeded from `fly.env.example` on first boot via
   `start.sh`). The guild IDs (`DISCORD_BOT_GUILD_ID`,
   `DISCORD_BOT_SESSION_CATEGORY_ID`, `DISCORD_BOT_ALLOWED_CHANNEL_IDS`,
@@ -499,6 +503,44 @@ root: `Dockerfile`, `fly.toml`, `fly.env.example`, `start.sh`,
   `starlette.testclient.TestClient` (httpx transport — no server, no
   network). The dashboard is NOT started from the standalone
   `comulytic-bridge` console script (bot-process lifecycle only).
+- **Session monitor** (`monitor.py`): a read-only background poll loop that
+  watches the opencode server for DESKTOP-session events and posts an embed
+  per event to `config.monitor_channel_id` (default channel
+  `1544715093491847249`, `MONITOR_ENABLED=false` by default). Purpose: when
+  a long opencode task runs on the desktop, the user can step away and
+  still see — from Discord — when a session needs a permission approved, a
+  question answered, or has completed. Events: question pending (orange
+  embed, `text_utils.question_block` body), permission needed (red embed,
+  `text_utils.permission_block` body), session completed (green embed with
+  a ~300-char snippet of the final assistant text via
+  `text_utils._final_assistant_text`). Sessions bound in EITHER
+  SessionRouter file (main bot's or bridge's — `/oc`, `/oc_plan`, bridge
+  channels) are EXCLUDED: they already surface questions/permissions/
+  responses in their own channels via the button UI, so re-notifying would
+  be duplicate noise. Completion detection: session ids with `busy`/`retry`
+  status in `GET /session/status` are tracked; a tracked id leaving the map
+  (the server deletes idle entries) = completed — sessions idle at monitor
+  start are never notified. Polls the same three documented GETs the button
+  UI uses (`get_session_status` + `list_questions` + `list_permissions`,
+  gathered with `return_exceptions=True`) at
+  `config.monitor_poll_interval_seconds` (default 10s, read per-cycle so
+  live tweaks apply) — NOT the SSE stream (known-stale, see
+  `OpencodeClient.stream_events`). READ-ONLY BY CONSTRUCTION: never calls
+  `reply_question` / `reject_question` / `reply_permission` /
+  `abort_session` — approvals stay at the desktop; visibility only, no
+  remote interaction. Embeds @mention `config.monitor_user_id`
+  (`MONITOR_USER_ID`, 0 = no mention) in the message CONTENT so the phone
+  buzzes. Lifecycle mirrors the bridge exactly: spawned from
+  `OpencodeBot.on_connect` gated on `config.monitor_enabled` +
+  `config.monitor_channel_id` (`self._monitor_task`, reconnect-guarded,
+  `_monitor_guard` crash isolation), cancelled + 5s-drained in
+  `OpencodeBot.close` before the serve teardown. The channel is resolved
+  once via `bot.fetch_channel` and re-resolved when a send fails (handles
+  deleted/recreated channels). `question_block` / `permission_block` live
+  in `text_utils.py` (the Pycord-free shared module) — `questions.py`
+  delegates to them via private aliases, keeping the button UI and the
+  monitor rendering identical. Tests: `tests/unit/test_monitor.py` (fakes —
+  `ScriptedOpencodeClient` + a duck-typed bot; no network, no gateway).
 
 ## Conventions
 
@@ -569,7 +611,9 @@ root: `Dockerfile`, `fly.toml`, `fly.env.example`, `start.sh`,
   `COMULYTIC_DISCORD_POINTER_CHANNEL_ID` / `COMULYTIC_QUESTION_TIMEOUT_SECONDS` /
   `COMULYTIC_QUESTION_POLL_INTERVAL_SECONDS` / `COMULYTIC_MAX_DURATION_HOURS` /
   `COMULYTIC_MAX_DURATION_MINUTES` / `COMULYTIC_MAX_DURATION_SECONDS` /
-  `DASHBOARD_ENABLED` / `DASHBOARD_PORT` / `DASHBOARD_TOKEN`.
+  `DASHBOARD_ENABLED` / `DASHBOARD_PORT` / `DASHBOARD_TOKEN` /
+  `MONITOR_ENABLED` / `MONITOR_CHANNEL_ID` / `MONITOR_USER_ID` /
+  `MONITOR_POLL_INTERVAL_SECONDS`.
 - Get the keys at: Discord bot token at
   https://discord.com/developers/applications (Bot tab), OpenAI key at
   https://platform.openai.com/api-keys, Ollama Cloud key at

@@ -199,6 +199,15 @@ class OpencodeBot(discord.Bot):
         # disabled or not yet started; guards against a reconnect re-spawn
         # (mirrors `_serve_started`).
         self._bridge_task: asyncio.Task | None = None
+        # Handle for the optional in-process session monitor task (spawned
+        # in `on_connect` when `config.monitor_enabled` +
+        # `config.monitor_channel_id` are set, cancelled + drained in
+        # `close()`). The monitor polls the opencode server's global
+        # question/permission/status endpoints and posts an embed per
+        # desktop-session event to `config.monitor_channel_id` — read-only,
+        # never replies/aborts. None when disabled or not yet started;
+        # guards against a reconnect re-spawn (mirrors `_bridge_task`).
+        self._monitor_task: asyncio.Task | None = None
         # Lazy handle for the Comulytic bridge's SessionRouter (separate
         # persistence file `.opencode-discord-bridge-sessions.json` — see
         # `_BRIDGE_SESSIONS_FILE` above). Constructed on first
@@ -760,6 +769,32 @@ class OpencodeBot(discord.Bot):
             self._bridge_task = asyncio.create_task(_bridge_guard())
             _log.info("comulytic bridge auto-started (in-process task)")
 
+        # Session monitor (read-only desktop-session notifications). Same
+        # in-process lifecycle pattern as the bridge: spawn when config
+        # says so, crash-isolated by a guard wrapper (a monitor crash logs
+        # and dies without taking the bot down), `self._monitor_task is
+        # None` guards against a reconnect re-spawn, and `close()` cancels
+        # + drains it. The monitor only READS the opencode server (status/
+        # question/permission/message GETs) and posts embeds to the
+        # configured Discord channel — see `monitor.py`.
+        if (
+            config.monitor_enabled
+            and config.monitor_channel_id
+            and self._monitor_task is None
+        ):
+            from opencode_discord_bot.monitor import run_monitor
+
+            async def _monitor_guard() -> None:
+                try:
+                    await run_monitor(self)
+                except asyncio.CancelledError:
+                    raise  # close() cancels cleanly
+                except Exception:  # noqa: BLE001 — monitor crash must not kill the bot
+                    _log.exception("session monitor task crashed")
+
+            self._monitor_task = asyncio.create_task(_monitor_guard())
+            _log.info("session monitor auto-started (in-process task)")
+
         # Ops dashboard (token-gated HTTP server, in-process uvicorn task).
         # start_dashboard() is idempotent (module guard) and a silent no-op
         # unless DASHBOARD_ENABLED=true AND a non-empty DASHBOARD_TOKEN are
@@ -845,6 +880,18 @@ class OpencodeBot(discord.Bot):
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 pass
             self._bridge_task = None
+        # Cancel + drain the session monitor BEFORE the serve teardown so
+        # it stops polling the opencode server before the server dies (a
+        # shorter drain ceiling than the bridge — a poll cycle is 3 cheap
+        # GETs + at most a few embed posts, well under 5s). Placed after
+        # the bridge drain, mirroring the spawn order in `on_connect`.
+        if self._monitor_task is not None:
+            self._monitor_task.cancel()
+            try:
+                await asyncio.wait_for(self._monitor_task, timeout=5.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                pass
+            self._monitor_task = None
         try:
             # `stop()` does blocking subprocess.run + proc.wait (up to ~8s on
             # Windows tree-kill). Offload it so the event loop keeps draining

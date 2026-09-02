@@ -162,3 +162,67 @@ def _slugify_prompt(prompt: str, fallback: str) -> str:
     if not slug:
         return fallback
     return slug[:_CHANNEL_NAME_MAX]
+
+
+# --- Question / permission request block renderers ---
+# Single source of truth for rendering an opencode question request
+# (``Question.Info``) or permission request (``Permission.Request``) as a
+# Discord markdown text block. Lives here (the Pycord-free shared module)
+# so BOTH the button UI (`questions.py`) and the session monitor
+# (`monitor.py`) render identical blocks — the monitor must not import
+# `questions.py` (which pulls the full Pycord ui.View surface) just for
+# text rendering. Ported from `questions.py`'s `_question_block` /
+# `_permission_block`; those now delegate here.
+
+
+def question_block(info: dict) -> str:
+    """Render one Question.Info as a header + options text block."""
+    header = info.get("header", info.get("question", "Question"))
+    multi = info.get("multiple") is True
+    custom = info.get("custom") is not False
+    out = [f"**{header}**"]
+    if info.get("question"):
+        out.append(f"> {info['question']}")
+    if info.get("options"):
+        out.append(_fmt_options(info["options"]))
+    tags = []
+    if multi:
+        tags.append("multi-select")
+    if custom:
+        tags.append("custom allowed")
+    if tags:
+        out.append(f"_({', '.join(tags)})_")
+    return "\n".join(out)
+
+
+def permission_block(request: dict) -> str:
+    """Render a permission request as a header + patterns + metadata block."""
+    perm = request.get("permission", "?")
+    patterns = request.get("patterns") or []
+    out = [f"**Permission: {perm}**"]
+    if patterns:
+        joined = ", ".join(f"`{p}`" for p in patterns)
+        out.append(f"Matching: {joined}")
+    meta = request.get("metadata") or {}
+    if meta:
+        meta_lines = [f"- `{k}`: {v}" for k, v in meta.items() if v is not None]
+        if meta_lines:
+            out.append("Metadata:\n" + "\n".join(meta_lines))
+    if perm == "doom_loop":
+        out.append(
+            ":warning: The agent appears stuck in a loop. Approving lets it "
+            "continue; rejecting cancels the looping tool."
+        )
+    return "\n".join(out)
+
+
+def _fmt_options(options: list[dict], limit: int = 10) -> str:
+    """Render an option list as a numbered text block for the message body."""
+    lines = []
+    for i, opt in enumerate(options[:limit], 1):
+        label = opt.get("label", "?")
+        desc = opt.get("description", "")
+        lines.append(f"**{i}.** {label}" + (f" — {desc}" if desc else ""))
+    if len(options) > limit:
+        lines.append(f"_(+{len(options) - limit} more, see menu)_")
+    return "\n".join(lines)

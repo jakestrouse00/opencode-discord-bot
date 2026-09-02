@@ -36,6 +36,8 @@ Env-var overrides (uppercase of the field name):
   / COMULYTIC_MAX_DURATION_HOURS / COMULYTIC_MAX_DURATION_MINUTES
   / COMULYTIC_MAX_DURATION_SECONDS
   / DASHBOARD_ENABLED / DASHBOARD_PORT / DASHBOARD_TOKEN
+  / MONITOR_ENABLED / MONITOR_CHANNEL_ID / MONITOR_USER_ID
+  / MONITOR_POLL_INTERVAL_SECONDS
 """
 
 from __future__ import annotations
@@ -333,9 +335,35 @@ class BotConfig(BaseSettings):
     # [[services]] block maps 443 -> this internal port).
     dashboard_port: int = 8080
     # Shared-secret bearer token. Every dashboard request (page + API) must
-    # present it via `Authorization: Bearer <token>` or `?token=<token>`.
+    # present it via `Authorization: Bearer <token>` or `?token=<t>`.
     # NO committed default — set via env var / Fly secret.
     dashboard_token: str = ""
+
+    # --- Session monitor (read-only desktop-session notifications) ---
+    # Master switch for the background monitor that watches the opencode
+    # server (typically the user's DESKTOP `opencode serve`, reached via the
+    # Fly/Tailscale setup) for pending permission requests, pending
+    # questions, and session completions, and posts a Discord embed per
+    # event to `monitor_channel_id`. READ-ONLY — the monitor never
+    # replies/rejects/aborts anything; approvals stay at the desktop. The
+    # monitor excludes sessions bound to Discord channels in either
+    # SessionRouter file (those already post their responses in their own
+    # channels — no duplicate notifications). Default False = the monitor
+    # never starts; flip via `MONITOR_ENABLED=true`.
+    monitor_enabled: bool = False
+    # The Discord text channel the monitor posts event embeds to. Defaults
+    # to the user's #opencode-monitor channel (a non-secret guild id). 0
+    # = monitor disabled even when monitor_enabled is true.
+    monitor_channel_id: int = 1544715093491847249
+    # The Discord user id @mentioned in each monitor embed's message content
+    # so the phone actually buzzes (a plain embed doesn't notify). 0 = no
+    # mention prefix. Non-secret; get it via Discord Developer Mode ->
+    # right-click your user -> Copy User ID.
+    monitor_user_id: int = 0
+    # How often (seconds) the monitor polls GET /session/status + /question
+    # + /permission. 10s is responsive without hammering the server (3
+    # cheap GETs per cycle). Read per-cycle so live tweaks apply.
+    monitor_poll_interval_seconds: float = 10.0
 
 
 # Module-level singleton. Importers read `config.<field>` (NOT a fresh
