@@ -21,9 +21,15 @@ Key surfaces:
 - Audio download (Path B PRIMARY): `GET {web_base}/api/note/audio-range/{noteId}`
   with the Bearer JWT in a cookie (`authorization=Bearer%20<jwt>`, URL-encoded).
   Stable `noteId`-based URL, no embedded expiry; only the JWT cookie (~150 days)
-  rotates. Single 206 returns the complete MP3.
+  rotates. Single 206 returns the complete MP3. The proxy host migrated
+  (web.comulytic.ai → web.comu.com, 2026-09) — redirects are followed manually
+  with per-hop re-auth because httpx strips `Authorization` on cross-host
+  redirects (see `download_audio_proxy`).
 - Audio download (Path A FALLBACK): pre-signed S3 URL via `noteDetail`, 48h TTL
-  (`X-Amz-Expires=172800`). Re-mint each cycle via `noteDetail`.
+  (`X-Amz-Expires=172800`). Re-mint each cycle via `noteDetail`. Sent via a
+  dedicated auth-free client — S3 rejects requests presenting BOTH the
+  query-string signature and an `Authorization` header (400 "Only one auth
+  mechanism allowed").
 
 The bridge transcribes LOCALLY via `voice.transcribe_audio` (faster-whisper
 by default) — Comulytic's cloud ASR (`queryTranscribeResult` /
@@ -208,6 +214,7 @@ class ComulyticClient:
         self._base_url = base_url.rstrip("/")
         self._web_base = web_base.rstrip("/")
         self._refresh_token = refresh_token
+        self._jwt = jwt
         ua = user_agent or _DEFAULT_UA
         # Mandatory header set (confirmed across all three HAR batches).
         # Origin/Referer MUST be pinned exactly or the allow-credentials CORS
@@ -243,10 +250,21 @@ class ComulyticClient:
             f"Bearer%20{jwt}",  # URL-encoded "Bearer <jwt>"
             domain=urllib.parse.urlparse(self._web_base).hostname or "web.comulytic.ai",
         )
+        # Bare client for Path A (pre-signed S3). MUST NOT carry the
+        # `Authorization` header: S3 rejects requests presenting both the
+        # query-string signature and an Authorization header with
+        # 400 InvalidArgument "Only one auth mechanism allowed". The default
+        # client's headers would leak onto the S3 GET.
+        self._s3_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=10.0, read=timeout, write=30.0, pool=30.0),
+            # Pre-signed URLs embed their own auth; no redirects expected.
+            follow_redirects=False,
+        )
 
     async def close(self) -> None:
-        """Close the underlying `httpx.AsyncClient`."""
+        """Close the underlying `httpx.AsyncClient` instances."""
         await self._client.aclose()
+        await self._s3_client.aclose()
 
     # --- low-level request ---
 
@@ -443,6 +461,15 @@ class ComulyticClient:
         `Content-Range: bytes 0-{N-1}/{N}` (the COMPLETE file — observed full
         sizes 59 MB / 79 KB / 85 MB / 86 MB). Stream the body, enforcing a
         `max_bytes` cap (default 120 MB).
+
+        Redirect handling: the proxy host migrated (web.comulytic.ai 301 →
+        web.comu.com, 2026-09). httpx strips the `Authorization` header on
+        cross-host redirects (and the cookie is domain-scoped), so
+        `follow_redirects` on the shared client would land on the new host
+        UNAUTHENTICATED → 401. Instead, follow up to a few redirects MANUALLY:
+        each hop re-sends the auth cookie for that hop's host via the
+        request's `cookies=` argument (per-request cookies are merged with
+        the jar's), so auth survives the domain change.
         """
         url = f"{self._web_base}/api/note/audio-range/{note_id}"
         headers = {
@@ -451,23 +478,46 @@ class ComulyticClient:
             "Cache-Control": "no-cache",
             # The cookie jar supplies `authorization`; keep the header too for
             # robustness (some proxies read the header, others the cookie).
+            # Sent per-hop below so a cross-host redirect re-authenticates.
+            "authorization": self._headers["authorization"],
+            "Origin": self._headers["Origin"],
+            "Referer": self._headers["Referer"],
+            "User-Agent": self._headers["User-Agent"],
+        }
+        auth_cookie = {
+            "authorization": f"Bearer%20{self._jwt}",
         }
         chunks: list[bytes] = []
         total = 0
-        async with self._client.stream("GET", url, headers=headers) as resp:
-            if resp.status_code >= 400:
-                body = await resp.aread()
-                raise ComulyticError(f"GET {url} -> {resp.status_code}: {body[:300]!r}")
-            # 206 (Partial Content) is the expected success; 200 is also fine.
-            async for chunk in resp.aiter_bytes():
-                total += len(chunk)
-                if total > max_bytes:
-                    raise ComulyticError(
-                        f"audio-range {note_id} exceeded {max_bytes} byte cap "
-                        f"(got {total})"
-                    )
-                chunks.append(chunk)
-        return b"".join(chunks)
+        for _hop in range(5):
+            async with self._client.stream(
+                "GET", url, headers=headers, cookies=auth_cookie
+            ) as resp:
+                if resp.status_code in (301, 302, 303, 307, 308):
+                    location = resp.headers.get("Location")
+                    if not location:
+                        raise ComulyticError(
+                            f"audio-range {note_id}: {resp.status_code} redirect "
+                            "without Location header"
+                        )
+                    url = str(httpx.URL(url).join(location))
+                    continue
+                if resp.status_code >= 400:
+                    body = await resp.aread()
+                    raise ComulyticError(f"GET {url} -> {resp.status_code}: {body[:300]!r}")
+                # 206 (Partial Content) is the expected success; 200 is also fine.
+                async for chunk in resp.aiter_bytes():
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise ComulyticError(
+                            f"audio-range {note_id} exceeded {max_bytes} byte cap "
+                            f"(got {total})"
+                        )
+                    chunks.append(chunk)
+                return b"".join(chunks)
+        raise ComulyticError(
+            f"audio-range {note_id}: exceeded 5 redirects (last url: {url[:200]})"
+        )
 
     async def download_audio_presigned(
         self, url: str, *, max_bytes: int = _MAX_AUDIO_BYTES
@@ -475,14 +525,17 @@ class ComulyticClient:
         """Path A (FALLBACK): `GET <presigned S3 url>` with `Range: bytes=0-`.
 
         No `Authorization` header — auth is embedded in the signed query
-        string. Server returns HTTP 206 Partial Content; stream the body,
-        enforcing a `max_bytes` cap. On HTTP 403, raise
+        string, and S3 REJECTS requests that present both (400
+        InvalidArgument "Only one auth mechanism allowed"). Sent via the
+        dedicated auth-free `_s3_client` so the API client's Bearer header
+        can't leak onto the S3 GET. Server returns HTTP 206 Partial Content;
+        stream the body, enforcing a `max_bytes` cap. On HTTP 403, raise
         `AudioUrlExpiredError` so the caller re-mints via `get_note_detail`.
         """
         headers = {"Range": "bytes=0-", "Accept-Encoding": "identity"}
         chunks: list[bytes] = []
         total = 0
-        async with self._client.stream("GET", url, headers=headers) as resp:
+        async with self._s3_client.stream("GET", url, headers=headers) as resp:
             if resp.status_code == 403:
                 raise AudioUrlExpiredError(
                     f"presigned S3 URL returned 403 (expired): {url[:200]}"

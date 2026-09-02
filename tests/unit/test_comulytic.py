@@ -234,7 +234,7 @@ async def test_download_audio_presigned_403_raises_expired():
         return httpx.Response(403, text="expired")
     transport = httpx.MockTransport(handler)
     c = ComulyticClient("https://api.test", jwt="jwt", user_agent="ua", web_base="https://web.test")
-    c._client = httpx.AsyncClient(transport=transport, base_url="https://web.test")
+    c._s3_client = httpx.AsyncClient(transport=transport)
     try:
         with pytest.raises(AudioUrlExpiredError):
             await c.download_audio_presigned("https://s3.example/x?sig=abc")
@@ -251,6 +251,86 @@ async def test_download_audio_proxy_4xx_raises_comulytic_error():
     try:
         with pytest.raises(ComulyticError, match="404"):
             await c.download_audio_proxy("n-1")
+    finally:
+        await c.close()
+
+
+async def test_download_audio_proxy_follows_cross_host_redirect_with_auth():
+    """Path B host migration (web.comulytic.ai → web.comu.com): the 301 must
+    be followed with the auth cookie + Authorization header RE-SENT on the
+    new host (httpx's follow_redirects would strip the header and leave the
+    domain-scoped cookie behind → 401 on every recording)."""
+    hops = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        hops.append((request.url.host, request.headers.get("authorization"),
+                     request.headers.get("cookie")))
+        if request.url.host == "old.test":
+            return httpx.Response(
+                301,
+                headers={"Location": "https://new.test/api/note/audio-range/n-1"},
+            )
+        return httpx.Response(206, content=b"audio-bytes-12345")
+
+    transport = httpx.MockTransport(handler)
+    c = ComulyticClient("https://api.test", jwt="jwt", user_agent="ua",
+                        web_base="https://old.test")
+    c._client = httpx.AsyncClient(transport=transport, base_url="https://old.test")
+    try:
+        result = await c.download_audio_proxy("n-1")
+        assert result == b"audio-bytes-12345"
+        # Two hops: old host (301) then new host (206).
+        assert [h[0] for h in hops] == ["old.test", "new.test"]
+        # Auth header AND cookie survive the cross-host redirect.
+        for host, auth, cookie in hops:
+            assert auth == "Bearer jwt", f"Authorization header missing on {host}"
+            assert cookie and "authorization=Bearer%20jwt" in cookie, (
+                f"auth cookie missing on {host}"
+            )
+    finally:
+        await c.close()
+
+
+async def test_download_audio_proxy_redirect_without_location_raises():
+    def handler(request):
+        return httpx.Response(301)  # no Location header
+    transport = httpx.MockTransport(handler)
+    c = ComulyticClient("https://api.test", jwt="jwt", user_agent="ua", web_base="https://web.test")
+    c._client = httpx.AsyncClient(transport=transport, base_url="https://web.test")
+    try:
+        with pytest.raises(ComulyticError, match="without Location"):
+            await c.download_audio_proxy("n-1")
+    finally:
+        await c.close()
+
+
+async def test_download_audio_presigned_sends_no_authorization_header():
+    """Path A must go through the auth-free `_s3_client`: S3 rejects requests
+    presenting both the query-string signature and an Authorization header
+    (400 InvalidArgument "Only one auth mechanism allowed")."""
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["authorization"] = request.headers.get("authorization")
+        captured["cookie"] = request.headers.get("cookie")
+        return httpx.Response(206, content=b"s3-bytes")
+
+    transport = httpx.MockTransport(handler)
+    c = ComulyticClient("https://api.test", jwt="jwt", user_agent="ua", web_base="https://web.test")
+    # Route BOTH clients through the transport so a header leak would show up.
+    c._client = httpx.AsyncClient(transport=transport, base_url="https://api.test")
+    c._s3_client = httpx.AsyncClient(transport=transport)
+    try:
+        result = await c.download_audio_presigned(
+            "https://s3.example/audio/x.mp3?X-Amz-Signature=abc"
+        )
+        assert result == b"s3-bytes"
+        assert captured["authorization"] is None, (
+            "Authorization header leaked onto the pre-signed S3 GET"
+        )
+        assert captured["cookie"] is None, (
+            "auth cookie leaked onto the pre-signed S3 GET"
+        )
     finally:
         await c.close()
 
