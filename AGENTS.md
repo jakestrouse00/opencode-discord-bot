@@ -70,12 +70,14 @@ control bot.
 ## Deployment (Fly.io)
 
 This is the production deployment the project is developed against. The
-bot runs on **Fly.io** as an outbound-only container — it has no inbound
-ports and connects out to the Discord gateway, Tailscale's coordination
-servers, the user's desktop `opencode serve` over a private Tailscale
-tunnel, the Comulytic API, and (optionally) OpenAI. The deployment files
-live at the repo root: `Dockerfile`, `fly.toml`, `fly.env.example`,
-`start.sh`, `.dockerignore`.
+bot runs on **Fly.io** as a primarily outbound-only container — it connects
+out to the Discord gateway, Tailscale's coordination servers, the user's
+desktop `opencode serve` over a private Tailscale tunnel, the Comulytic
+API, and (optionally) OpenAI. The ONE inbound surface is the token-gated
+ops dashboard (`[[services]]` → internal port 8080), which 401s every
+request without `DASHBOARD_TOKEN`. The deployment files live at the repo
+root: `Dockerfile`, `fly.toml`, `fly.env.example`, `start.sh`,
+`.dockerignore`.
 
 - **No in-container `opencode serve`.** The bot's local default
   (`OPENCODE_SERVE_ENABLED=true`) auto-spawns `opencode serve` as a child
@@ -109,7 +111,10 @@ live at the repo root: `Dockerfile`, `fly.toml`, `fly.env.example`,
   pydantic-settings: `DISCORD_BOT_TOKEN`, `OPENCODE_SERVER_PASSWORD`,
   `OPENCODE_SERVER_URL`, `OPENCODE_SERVE_ENABLED`, `TAILSCALE_AUTHKEY`,
   `COMULYTIC_JWT`/`COMULYTIC_REFRESH_TOKEN`, `OPENAI_API_KEY`,
-  `OLLAMA_AUTH_KEY`. Non-sensitive runtime config + the guild-specific IDs
+  `OLLAMA_AUTH_KEY`, and the dashboard pair `DASHBOARD_ENABLED=true` +
+  `DASHBOARD_TOKEN=<random>` (the dashboard only starts when BOTH are set;
+  `DASHBOARD_TOKEN` must be a long random string — every dashboard request
+  must present it). Non-sensitive runtime config + the guild-specific IDs
   live in `/data/.env` (seeded from `fly.env.example` on first boot via
   `start.sh`). The guild IDs (`DISCORD_BOT_GUILD_ID`,
   `DISCORD_BOT_SESSION_CATEGORY_ID`, `DISCORD_BOT_ALLOWED_CHANNEL_IDS`,
@@ -146,21 +151,30 @@ live at the repo root: `Dockerfile`, `fly.toml`, `fly.env.example`,
   1. `flyctl secrets set DISCORD_BOT_TOKEN=... OPENCODE_SERVER_PASSWORD=...
      OPENCODE_SERVER_URL=http://<desktop-tailscale-ip>:4097
      OPENCODE_SERVE_ENABLED=false TAILSCALE_AUTHKEY=tskey-...` (+ optional
-     `COMULYTIC_*`, `OPENAI_API_KEY`, `OLLAMA_AUTH_KEY`, voice settings).
-  2. `flyctl deploy` (builds the Dockerfile, provisions the `bot_data`
+     `COMULYTIC_*`, `OPENAI_API_KEY`, `OLLAMA_AUTH_KEY`, voice settings,
+     and — since the dashboard landed — `DASHBOARD_ENABLED=true
+     DASHBOARD_TOKEN=<random>`).
+  2. `flyctl ips allocate-v4 --shared` + `flyctl ips allocate-v6` —
+     one-time. Provisions the public ingress IPs that back
+     `https://<app>.fly.dev` and the dashboard's `[[services]]` block.
+     Fly does NOT auto-allocate these on deploy: the app was originally
+     outbound-only (zero IPs), and a `[[services]]` block alone leaves the
+     hostname DNS-less with a "can't connect" symptom. Verify with
+     `flyctl ips list` (expect a shared v4 + a v6).
+  3. `flyctl deploy` (builds the Dockerfile, provisions the `bot_data`
      volume on first deploy).
-  3. First boot: `start.sh` seeds `/data/.env` from `fly.env.example`.
-  4. `flyctl ssh console -C "cp /app/fly.env.example /data/.env"` if a
+  4. First boot: `start.sh` seeds `/data/.env` from `fly.env.example`.
+  5. `flyctl ssh console -C "cp /app/fly.env.example /data/.env"` if a
      re-seed is ever needed (the template is copied into the image at
      `/app/fly.env.example`).
-  5. Sync slash commands:
+  6. Sync slash commands:
      `flyctl ssh console -C "cd /data && /venv/bin/python -m opencode_discord_bot.sync_commands --guild <id>"`
      (the bot does NOT auto-sync on startup).
-  6. Start/restart the machine so the bot runs. In Discord, invoke
+  7. Start/restart the machine so the bot runs. In Discord, invoke
      `/oc_setup` (requires Manage Channels) — it creates the "OpenCode
      Sessions" category + `voice-recordings` + `bot-commands` channels and
      writes their IDs + the guild id to `/data/.env`.
-  7. Stop, re-sync commands (so every command is registered now that
+  8. Stop, re-sync commands (so every command is registered now that
      `/oc_setup` has written the guild config), restart.
 - **`OPENCODE_SERVE_CWD` on Fly:** not set — the bot does NOT spawn
   `opencode serve` on Fly (`OPENCODE_SERVE_ENABLED=false`), so the serve
@@ -438,6 +452,53 @@ live at the repo root: `Dockerfile`, `fly.toml`, `fly.env.example`,
   script is unaffected. The old `comulytic_audio_fallback` config flag (cloud
   ASR primary, local Whisper fallback) is GONE — local Whisper is the sole
   path, so there's nothing to fall back from.
+- **Ops dashboard** (`dashboard.py` + `dashboard_state.py`): a token-gated
+  Starlette + uvicorn HTTP dashboard served **in-process** (one event loop
+  with the bot + bridge, started from `OpencodeBot.on_connect` via
+  `start_dashboard()`, stopped in `close()` via `stop_dashboard()`). Only
+  starts when `DASHBOARD_ENABLED=true` AND a non-empty `DASHBOARD_TOKEN`
+  are both set — an empty token means the dashboard NEVER starts (local
+  default + Fly deployments without the secrets are unchanged). Auth:
+  every request (page + API) presents the token via
+  `Authorization: Bearer <t>` or `?token=<t>` (constant-time compare);
+  the HTML page keeps the query token and fetches APIs client-side.
+  `dashboard_state.py` is the shared-state module (mirrors the
+  `bridge_state.py` pattern — module-level state, race-free on the shared
+  loop, no imports from the bridge/dashboard surface). **Stats tab:**
+  bridge metrics (processed/skipped/failed counters, last poll time +
+  status, in-flight note id, seen count, recent-recordings history), system
+  health (uptime, RSS from /proc), session bindings (read-only render of
+  BOTH router JSON files), and the last ~500 log lines (in-memory ring via
+  `dashboard_state.RingLogHandler` on the root logger, uvicorn loggers
+  excluded). **Controls tab** (all EPHEMERAL — restart resets every toggle,
+  an explicit user decision so a forgotten kill switch can't drop
+  recordings after a redeploy):
+  - *Skip transcription*: while ON, `poll_once` marks new audio-delivered
+    recordings as seen WITHOUT transcribing/routing (the
+    accidental-recording kill switch — recordings are silently dropped).
+  - *Pause/resume*: while paused, the poll loop skips `poll_once`
+    entirely — nothing is marked seen, so the backlog processes on resume
+    (deliberately different semantics from skip: pause HOLDS, skip DROPS).
+  - *Seen-set management*: "mark all current as seen" (bulk-skip
+    everything on Comulytic) and "clear seen-set" (destructive —
+    everything reprocesses). Both are queued as a pending action in
+    `dashboard_state` and applied by the bridge task at the top of the
+    next poll cycle (`_apply_pending_actions`) — the bridge owns ALL
+    writes to `.comulytic-seen.json`; the dashboard never mutates the set
+    directly.
+  - *Abort in-flight*: cancels the per-recording task registered via
+    `dashboard_state.set_in_flight` (the recording is wrapped in its own
+    `asyncio.create_task` inside `poll_once`'s loop, so abort kills ONLY
+    that recording, never the bridge task). The recording is already in
+    `seen`, so it won't reprocess.
+  - *Live config tweaks*: `POST /api/config` mutates the `config` singleton
+    in place (poll interval, page size, max-duration h/m/s); the poll
+    loop reads these per-cycle so changes apply immediately. A restart
+    reverts to `.env`/Fly-secret values.
+  Deps: `starlette` + `uvicorn` (in `pyproject.toml`); tests use
+  `starlette.testclient.TestClient` (httpx transport — no server, no
+  network). The dashboard is NOT started from the standalone
+  `comulytic-bridge` console script (bot-process lifecycle only).
 
 ## Conventions
 
@@ -507,7 +568,8 @@ live at the repo root: `Dockerfile`, `fly.toml`, `fly.env.example`,
   `COMULYTIC_RELOGIN_WARN_DAYS` / `COMULYTIC_STATE_FILE` /
   `COMULYTIC_DISCORD_POINTER_CHANNEL_ID` / `COMULYTIC_QUESTION_TIMEOUT_SECONDS` /
   `COMULYTIC_QUESTION_POLL_INTERVAL_SECONDS` / `COMULYTIC_MAX_DURATION_HOURS` /
-  `COMULYTIC_MAX_DURATION_MINUTES` / `COMULYTIC_MAX_DURATION_SECONDS`.
+  `COMULYTIC_MAX_DURATION_MINUTES` / `COMULYTIC_MAX_DURATION_SECONDS` /
+  `DASHBOARD_ENABLED` / `DASHBOARD_PORT` / `DASHBOARD_TOKEN`.
 - Get the keys at: Discord bot token at
   https://discord.com/developers/applications (Bot tab), OpenAI key at
   https://platform.openai.com/api-keys, Ollama Cloud key at

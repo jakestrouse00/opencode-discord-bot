@@ -42,6 +42,11 @@ dependencies = [
     # OpenAI API client — used for TTS + cloud STT fallback. Not needed if
     # voice_tts_enabled=false AND voice_stt_provider=local.
     "openai",
+    # Ops dashboard HTTP server (Starlette app + ASGI server). Serves the
+    # stats/controls dashboard on Fly (token-gated). httpx (above) provides
+    # the transport for starlette's TestClient in the unit tests.
+    "starlette>=0.37",
+    "uvicorn>=0.30",
 ]
 
 # Optional speaker identification (diarization) extra. Pulls in the heavy

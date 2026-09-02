@@ -35,6 +35,16 @@
 #   OPENAI_API_KEY            — only if VOICE_STT_PROVIDER=openai or auto
 #   OLLAMA_AUTH_KEY           — only if you want LLM channel-name slugs
 #
+# Ops dashboard (token-gated; disabled unless BOTH are set):
+#   DASHBOARD_ENABLED        — true (master switch; the in-process uvicorn
+#                               server only starts when this AND a non-empty
+#                               DASHBOARD_TOKEN are present)
+#   DASHBOARD_TOKEN          — <random shared secret> (bearer/?token= auth;
+#                               constant-time compare; an empty token means
+#                               the dashboard NEVER starts)
+#   DASHBOARD_PORT           — 8080 (default; must match [[services]]
+#                               internal_port below)
+#
 # DO NOT set as Fly secrets (they break /oc_setup's .env write on the volume
 # because pydantic-settings env vars shadow .env file values):
 #   DISCORD_BOT_GUILD_ID            — pass via `sync_commands --guild <id>` instead;
@@ -88,12 +98,27 @@ primary_region = "iad"
   source = "bot_data"
   destination = "/data"
 
-# No [[services]] block — the bot has no inbound ports. It connects outbound
-# to the Discord gateway (wss://gateway.discord.gg), Tailscale coordination
-# servers, the user's desktop opencode serve (over Tailscale), and optionally
-# the Comulytic API + OpenAI. Fly's auto-stop/autostart is NOT used (the bot
-# must stay connected to the Discord gateway to receive slash commands +
-# plain-text follow-ups in real time).
+# Inbound HTTP service: the token-gated ops dashboard ONLY. The bot itself
+# remains outbound-only (Discord gateway, Tailscale, opencode serve,
+# Comulytic API, optional OpenAI) — this port exists solely so the dashboard
+# (stats + bridge controls) is reachable at https://<app>.fly.dev. Every
+# dashboard request must present DASHBOARD_TOKEN (Bearer header or
+# ?token=<t>) or it 401s; the bot does NOT accept commands over HTTP.
+# Fly's auto-stop/autostop is NOT used (the bot must stay connected to the
+# Discord gateway to receive slash commands + plain-text follow-ups in
+# real time).
+[[services]]
+  internal_port = 8080
+  protocol = "tcp"
+
+  [[services.ports]]
+    port = 80
+    handlers = ["http"]
+    force_https = true
+
+  [[services.ports]]
+    port = 443
+    handlers = ["tls", "http"]
 
 # No [metrics] block — the bot has no HTTP server (it's a Discord gateway
 # client, not a web server). Fly logs are the observability surface

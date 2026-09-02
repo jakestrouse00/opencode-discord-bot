@@ -297,6 +297,49 @@ All settings are env vars (uppercase of the field name) or entries in a
 After `/oc` or `/oc_plan` creates a session channel, any plain-text message in
 that channel is forwarded as a follow-up prompt to the bound opencode session.
 
+## Dashboard (optional, token-gated)
+
+The bot can serve an in-process ops dashboard for watching + controlling the
+Comulytic bridge. It only starts when **both** `DASHBOARD_ENABLED=true` and a
+non-empty `DASHBOARD_TOKEN` are set (an empty token means it never starts).
+Every request must present the token via `Authorization: Bearer <t>` or
+`?token=<t>`.
+
+**Stats tab:** processed / skipped / failed counters, last poll time + status,
+in-flight recording, seen-set size, per-recording history, bridge flags,
+uptime, memory RSS, session bindings (both router files), and the last ~500
+log lines — no more `flyctl logs` for recent history.
+
+**Controls tab** (all toggles reset on restart):
+
+| Control | What it does |
+|---|---|
+| Skip transcription ON/OFF | While ON, every NEW recording from Comulytic is marked processed (seen) but never transcribed or routed to Bobby — the accidental-recording kill switch. |
+| Pause / resume polling | Paused = poll cycles skipped entirely; nothing is marked seen, so the backlog processes on resume. (Pause HOLDS; skip DROPS.) |
+| Abort current recording | Cancels the recording being transcribed right now (it's already marked seen — it won't reprocess). |
+| Mark ALL current recordings as seen | Bulk-skips everything currently on Comulytic with one click. |
+| Clear seen-set | Destructive: everything on Comulytic reprocesses on the next cycle. |
+| Live config | Change poll interval, page size, and the max-duration cap on the running process (reverts on restart). |
+
+### On Fly.io
+
+The app's `[[services]]` block maps `https://opencode-discord-bot.fly.dev` to
+the dashboard port. After deploying the dashboard-enabled image:
+
+```bash
+flyctl secrets set DASHBOARD_ENABLED=true DASHBOARD_TOKEN=<random long string>
+flyctl deploy
+```
+
+Then open `https://opencode-discord-bot.fly.dev/?token=<token>`.
+
+### Locally
+
+```bash
+DASHBOARD_ENABLED=true DASHBOARD_TOKEN=devtoken python -m opencode_discord_bot
+# open http://localhost:8080/?token=devtoken
+```
+
 ## Voice Setup
 
 The default `voice_stt_provider=local` uses

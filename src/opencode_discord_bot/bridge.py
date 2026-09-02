@@ -54,8 +54,10 @@ import json
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 
+from opencode_discord_bot import dashboard_state
 from opencode_discord_bot.bridge_questions import poll_pending_requests_rest
 from opencode_discord_bot.bridge_state import clear_active, mark_active
 from opencode_discord_bot.comulytic import (
@@ -324,6 +326,10 @@ async def run_bridge() -> None:
         await _probe_openapi_visibility(comulytic)
 
         seen, bootstrapped = _load_seen(config.comulytic_state_file)
+        # Publish the live seen-set to the dashboard (read-only stats — the
+        # dashboard never mutates it; seen-set writes are bridge-owned).
+        dashboard_state.register_seen(seen)
+        dashboard_state.reset()
         _log.info(
             "bridge started (poll interval=%.1fs, page_size=%d, audio_path=%s, "
             "state_file=%s, seen=%d, bootstrapped=%s, discord_surface=%s)",
@@ -337,6 +343,24 @@ async def run_bridge() -> None:
         )
 
         while True:
+            # Apply any dashboard-queued seen-set action BEFORE anything else
+            # (so "mark all seen" wins even while new recordings appear, and
+            # "clear seen" takes effect before the next enumerate).
+            try:
+                await _apply_pending_actions(comulytic, seen, config.comulytic_state_file)
+            except ComulyticError as exc:
+                _log.error("seen-set action failed: %s", exc)
+            except Exception:  # noqa: BLE001 — an action crash must not kill the bridge
+                _log.exception("seen-set action crashed (continuing)")
+
+            # Dashboard pause: skip the poll cycle entirely. Nothing is
+            # marked seen while paused, so the backlog processes on resume
+            # (deliberately different semantics from the skip toggle).
+            if dashboard_state.is_paused():
+                _log.info("bridge paused via dashboard — skipping poll cycle")
+                await asyncio.sleep(config.comulytic_poll_interval_seconds)
+                continue
+
             try:
                 bootstrapped = await poll_once(
                     comulytic,
@@ -347,12 +371,15 @@ async def run_bridge() -> None:
                     rest=rest,
                     router=router,
                 )
+                dashboard_state.set_poll_result("ok")
             except ComulyticError as exc:
                 _log.error("poll cycle failed: %s", exc)
+                dashboard_state.set_poll_result(f"error: {exc}")
             except (
                 Exception
             ):  # noqa: BLE001 — a poll cycle crash must not kill the bridge
                 _log.exception("poll cycle crashed (continuing)")
+                dashboard_state.set_poll_result("crashed")
             await asyncio.sleep(config.comulytic_poll_interval_seconds)
     finally:
         _save_seen(config.comulytic_state_file, seen, bootstrapped)
@@ -429,6 +456,40 @@ async def _probe_openapi_visibility(comulytic: ComulyticClient) -> None:
 # ---------------------------------------------------------------------------
 # Poll cycle
 # ---------------------------------------------------------------------------
+
+
+async def _apply_pending_actions(
+    comulytic: ComulyticClient, seen: set[str], state_path: str
+) -> None:
+    """Consume a dashboard-queued seen-set action, if any.
+
+    "mark_all_seen": enumerate every current noteId and add it to `seen`
+    (bulk-skip — everything currently on Comulytic is dropped on the next
+    cycle). "clear_seen": empty `seen` (destructive — everything
+    reprocesses). Both persist immediately via `_save_seen`.
+
+    Called at the TOP of each poll-cycle iteration (BEFORE the pause check
+    so a queued action still applies while paused — the pause only stops
+    polling, not queued maintenance).
+    """
+    action = dashboard_state.take_pending_action()
+    if action is None:
+        return
+    if action == "mark_all_seen":
+        total, _newest = await comulytic.probe_newest()
+        all_ids = await _enumerate_all_note_ids(comulytic, total)
+        seen.update(all_ids)
+        _save_seen(state_path, seen, True)
+        _log.info(
+            "dashboard action: marked all %d current recordings as seen",
+            len(all_ids),
+        )
+    elif action == "clear_seen":
+        seen.clear()
+        _save_seen(state_path, seen, True)
+        _log.warning("dashboard action: CLEARED seen-set — all recordings reprocess")
+    else:
+        _log.warning("dashboard action: unknown pending action %r ignored", action)
 
 
 async def poll_once(
@@ -516,17 +577,65 @@ async def poll_once(
         len(new_ids) - len(delivered),
     )
 
+    # --- Dashboard skip-transcription toggle: mark new audio-delivered
+    # recordings as seen WITHOUT processing them (the accidental-recording
+    # kill switch). They are already in `seen` (the update above), so an
+    # early return here leaves them marked — they won't re-appear as "new"
+    # next cycle. The toggle is ephemeral: OFF by default and resets on
+    # restart (dashboard_state), so recordings are never silently dropped
+    # across a deploy.
+    if dashboard_state.is_skipping_transcription():
+        _log.info(
+            "skip-transcription ON (dashboard) — marking %d recording(s) seen "
+            "without processing",
+            len(delivered),
+        )
+        dashboard_state.record_skipped(len(delivered))
+        for nid in delivered:
+            dashboard_state.add_history(nid, "skipped", 0.0)
+        _save_seen(state_path, seen, bootstrapped)
+        return bootstrapped
+
     for note_id in delivered:
+        started = time.monotonic()
+        task = asyncio.create_task(
+            process_new_recording(comulytic, opencode, note_id, rest=rest, router=router)
+        )
+        dashboard_state.set_in_flight(task, note_id)
         try:
-            await process_new_recording(
-                comulytic, opencode, note_id, rest=rest, router=router
-            )
+            result = await task
+        except asyncio.CancelledError:
+            # Dashboard abort cancels ONLY the in-flight recording task.
+            # The recording is already in `seen`, so it won't reprocess —
+            # log + count it and continue the loop.
+            _log.warning("recording %s aborted via dashboard", note_id)
+            dashboard_state.record_failed()
+            dashboard_state.add_history(note_id, "aborted", time.monotonic() - started)
+            dashboard_state.clear_in_flight()
+            continue
         except ComulyticError as exc:
             _log.error("recording %s failed: %s", note_id, exc)
+            dashboard_state.record_failed()
+            dashboard_state.add_history(note_id, "failed", time.monotonic() - started)
+            dashboard_state.clear_in_flight()
+            continue
         except (
             Exception
         ):  # noqa: BLE001 — one recording's crash must not kill the cycle
             _log.exception("recording %s crashed (continuing)", note_id)
+            dashboard_state.record_failed()
+            dashboard_state.add_history(note_id, "failed", time.monotonic() - started)
+            dashboard_state.clear_in_flight()
+            continue
+        dashboard_state.clear_in_flight()
+        if result.get("skipped_reason"):
+            dashboard_state.record_skipped()
+            dashboard_state.add_history(
+                note_id, result["skipped_reason"], time.monotonic() - started
+            )
+        else:
+            dashboard_state.record_processed()
+            dashboard_state.add_history(note_id, "processed", time.monotonic() - started)
 
     # Clear the paging-item cache so it can't leak across cycles (entries
     # already pop'd in `_is_note_audio_delivered` are gone; any leftover

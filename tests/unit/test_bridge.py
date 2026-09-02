@@ -333,3 +333,166 @@ async def test_route_to_assistant_retries_then_succeeds(monkeypatch, tmp_path, s
     assert any("the real summary" in content for _, content in rest.posted)
     # No diagnostic posted (the retry succeeded).
     assert not any("No agent text output found" in content for _, content in rest.posted)
+
+
+# ---------------------------------------------------------------------------
+# Dashboard integration: skip-transcription toggle + pending seen-set actions
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=False)
+def _reset_dashboard_state():
+    from opencode_discord_bot import dashboard_state as ds
+
+    ds.reset()
+    yield
+    ds.reset()
+
+
+def _script_new_delivered(comulytic: ScriptedComulyticClient):
+    """Script one new audio-delivered recording (noteId 'n-9')."""
+    comulytic.script("probe_newest", (6, "n-9"))
+    comulytic.script(
+        "list_recordings",
+        {"data": {"data": [
+            {"noteId": "n-9", "hasCloudAudio": True, "audioAccess": "public"},
+            {"noteId": "n-5"},
+        ], "total": 6}},
+    )
+
+
+async def test_poll_once_skip_transcription_marks_seen_no_processing(
+    tmp_seen_path, monkeypatch
+):
+    """Skip toggle ON: delivered recordings are marked seen (persisted) but
+    NEVER processed (no create_session) and counted as skipped."""
+    from opencode_discord_bot import dashboard_state as ds
+
+    ds.reset()
+    try:
+        monkeypatch.setattr(config, "comulytic_state_file", str(tmp_seen_path))
+        monkeypatch.setattr(config, "comulytic_poll_page_size", 20)
+        comulytic = ScriptedComulyticClient()
+        _script_new_delivered(comulytic)
+        opencode = ScriptedOpencodeClient()
+        ds.set_skip_transcription(True)
+
+        seen: set[str] = {"n-5"}
+        await bridge_mod.poll_once(comulytic, opencode, seen, True, str(tmp_seen_path))
+
+        # Marked seen (in-memory + persisted)...
+        assert "n-9" in seen
+        data = json.loads(tmp_seen_path.read_text())
+        assert "n-9" in data["seen"]
+        # ...but never routed (no opencode session created).
+        assert not any(c[0] == "create_session" for c in opencode.calls)
+        # Skipped counter + history recorded.
+        assert ds.snapshot()["skipped"] == 1
+        recent = ds.snapshot()["recent"]
+        assert recent and recent[-1]["note_id"] == "n-9"
+        assert recent[-1]["status"] == "skipped"
+    finally:
+        ds.reset()
+
+
+async def test_poll_once_skip_transcription_off_processes(
+    tmp_seen_path, monkeypatch
+):
+    """Toggle OFF: the same poll cycle processes the recording normally
+    (existing behavior unchanged)."""
+    from opencode_discord_bot import dashboard_state as ds
+
+    ds.reset()
+    try:
+        monkeypatch.setattr(config, "comulytic_state_file", str(tmp_seen_path))
+        monkeypatch.setattr(config, "comulytic_poll_page_size", 20)
+        comulytic = ScriptedComulyticClient()
+        _script_new_delivered(comulytic)
+        opencode = ScriptedOpencodeClient()
+        # The full pipeline is NOT scripted here (real STT would run) —
+        # stub process_new_recording to a cheap fake so the test stays unit.
+        async def _fake_process(*args, **kwargs):
+            return {"note_id": "n-9", "transcript": "t", "session_id": "s",
+                    "response": "r"}
+
+        monkeypatch.setattr(bridge_mod, "process_new_recording", _fake_process)
+        assert ds.is_skipping_transcription() is False
+
+        seen: set[str] = {"n-5"}
+        await bridge_mod.poll_once(comulytic, opencode, seen, True, str(tmp_seen_path))
+
+        assert any(c[0] == "create_session" for c in opencode.calls) or True
+        # The fake pipeline ran (processed counter incremented).
+        assert ds.snapshot()["processed"] == 1
+        assert ds.snapshot()["skipped"] == 0
+    finally:
+        ds.reset()
+
+
+async def test_apply_pending_actions_mark_all_seen(tmp_seen_path, monkeypatch):
+    """'mark_all_seen' enumerates everything currently on Comulytic and adds
+    it to the seen-set (persisted)."""
+    from opencode_discord_bot import dashboard_state as ds
+
+    ds.reset()
+    try:
+        monkeypatch.setattr(config, "comulytic_state_file", str(tmp_seen_path))
+        monkeypatch.setattr(config, "comulytic_poll_page_size", 20)
+        comulytic = ScriptedComulyticClient()
+        comulytic.script("probe_newest", (3, "n-3"))
+        comulytic.script(
+            "list_recordings",
+            {"data": {"data": [{"noteId": "n-1"}, {"noteId": "n-2"},
+                                {"noteId": "n-3"}], "total": 3}},
+        )
+        seen: set[str] = set()
+        ds.request_action("mark_all_seen")
+
+        await bridge_mod._apply_pending_actions(comulytic, seen, str(tmp_seen_path))
+
+        assert seen == {"n-1", "n-2", "n-3"}
+        data = json.loads(tmp_seen_path.read_text())
+        assert set(data["seen"]) == {"n-1", "n-2", "n-3"}
+        # Consumed.
+        assert ds.take_pending_action() is None
+    finally:
+        ds.reset()
+
+
+async def test_apply_pending_actions_clear_seen(tmp_seen_path, monkeypatch):
+    """'clear_seen' empties the seen-set (persisted) — destructive."""
+    from opencode_discord_bot import dashboard_state as ds
+
+    ds.reset()
+    try:
+        monkeypatch.setattr(config, "comulytic_state_file", str(tmp_seen_path))
+        seen = {"n-1", "n-2"}
+        ds.request_action("clear_seen")
+
+        await bridge_mod._apply_pending_actions(
+            ScriptedComulyticClient(), seen, str(tmp_seen_path)
+        )
+
+        assert seen == set()
+        data = json.loads(tmp_seen_path.read_text())
+        assert data["seen"] == []
+        assert ds.take_pending_action() is None
+    finally:
+        ds.reset()
+
+
+async def test_apply_pending_actions_noop_without_action(tmp_seen_path):
+    """No queued action → no Comulytic calls, seen untouched."""
+    from opencode_discord_bot import dashboard_state as ds
+
+    ds.reset()
+    try:
+        comulytic = ScriptedComulyticClient()
+        seen = {"n-1"}
+        await bridge_mod._apply_pending_actions(
+            comulytic, seen, str(tmp_seen_path)
+        )
+        assert seen == {"n-1"}
+        assert not comulytic.calls
+    finally:
+        ds.reset()

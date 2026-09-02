@@ -760,6 +760,16 @@ class OpencodeBot(discord.Bot):
             self._bridge_task = asyncio.create_task(_bridge_guard())
             _log.info("comulytic bridge auto-started (in-process task)")
 
+        # Ops dashboard (token-gated HTTP server, in-process uvicorn task).
+        # start_dashboard() is idempotent (module guard) and a silent no-op
+        # unless DASHBOARD_ENABLED=true AND a non-empty DASHBOARD_TOKEN are
+        # set — so the local default and Fly deployments that haven't set
+        # the secrets are unchanged. Stopped in `close()` before the bridge
+        # teardown.
+        from opencode_discord_bot.dashboard import start_dashboard
+
+        start_dashboard()
+
         # Event-loop watchdog: log "event loop alive" every 60s. If the loop
         # freezes (a blocking call stalls asyncio), this stops printing — a
         # visible signal instead of a silent stall. Guarded by `is None` so a
@@ -818,6 +828,16 @@ class OpencodeBot(discord.Bot):
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 pass
             self._watchdog_task = None
+        # Stop the dashboard HTTP server BEFORE the bridge teardown so the
+        # token-gated surface stops accepting requests while the bridge +
+        # serve wind down. Best-effort (never raises; a no-op when the
+        # dashboard never started).
+        try:
+            from opencode_discord_bot.dashboard import stop_dashboard
+
+            stop_dashboard()
+        except Exception:  # noqa: BLE001 — teardown must not raise
+            _log.warning("dashboard stop raised during close", exc_info=True)
         if self._bridge_task is not None:
             self._bridge_task.cancel()
             try:

@@ -35,6 +35,7 @@ Env-var overrides (uppercase of the field name):
   / COMULYTIC_QUESTION_TIMEOUT_SECONDS / COMULYTIC_QUESTION_POLL_INTERVAL_SECONDS
   / COMULYTIC_MAX_DURATION_HOURS / COMULYTIC_MAX_DURATION_MINUTES
   / COMULYTIC_MAX_DURATION_SECONDS
+  / DASHBOARD_ENABLED / DASHBOARD_PORT / DASHBOARD_TOKEN
 """
 
 from __future__ import annotations
@@ -321,6 +322,20 @@ class BotConfig(BaseSettings):
     comulytic_max_duration_hours: int = 1
     comulytic_max_duration_minutes: int = 0
     comulytic_max_duration_seconds: int = 0
+
+    # --- Ops dashboard ---
+    # Master switch for the token-gated HTTP dashboard (stats + controls)
+    # served in-process alongside the bot. Disabled by default; requires a
+    # non-empty dashboard_token to start (an empty token keeps the server
+    # from EVER starting, so local default behavior is unchanged).
+    dashboard_enabled: bool = False
+    # Port the dashboard binds (0.0.0.0 inside the container; Fly's
+    # [[services]] block maps 443 -> this internal port).
+    dashboard_port: int = 8080
+    # Shared-secret bearer token. Every dashboard request (page + API) must
+    # present it via `Authorization: Bearer <token>` or `?token=<token>`.
+    # NO committed default — set via env var / Fly secret.
+    dashboard_token: str = ""
 
 
 # Module-level singleton. Importers read `config.<field>` (NOT a fresh
