@@ -121,33 +121,41 @@ class TestEmbedBuilders:
 
 
 async def _run_cycles(bot, cycles: int, *, exclude_none_routers: bool = True) -> None:
-    """Drive `run_monitor` for exactly N poll cycles, then cancel it.
+    """Drive `run_monitor` for exactly N COMPLETE poll cycles.
 
-    Uses a side-effect hook on get_session_status to cancel the monitor
-    task on the Nth cycle so the loop exits deterministically (the sleep
-    between cycles is also real asyncio sleep; with the default 10s
-    interval that would stall tests, so `config.monitor_poll_interval_seconds`
-    is monkeypatched to ~0).
+    Wraps `monitor._poll_once` with a counter: after the Nth completed
+    cycle the wrapper cancels the monitor task, so cycles 1..N run to
+    full completion (all fan-out polls included) and no partial N+1st
+    cycle ever starts. This is the only fully deterministic anchor under
+    per-directory polling — side-effect hooks fire mid-cycle (before the
+    scripted return), so anchoring on any single client call either
+    cancels early or races the fan-out.
+    `config.monitor_poll_interval_seconds` is monkeypatched to ~0 so the
+    sleep between cycles doesn't stall tests.
     """
+    real_poll_once = monitor._poll_once
+    counter = {"n": 0}
 
-    async def runner():
-        await monitor.run_monitor(bot)
+    async def counting_poll_once(bot_, client_, state_):
+        await real_poll_once(bot_, client_, state_)
+        counter["n"] += 1
+        if counter["n"] >= cycles:
+            raise asyncio.CancelledError
 
-    task = asyncio.create_task(runner())
-    state = {"n": 0}
-    client = bot.client
-
-    def on_status(_queue):
-        state["n"] += 1
-        if state["n"] >= cycles:
-            task.cancel()
-
-    client.on_call("get_session_status", on_status)
+    monitor._poll_once = counting_poll_once
     try:
-        await asyncio.wait_for(task, timeout=5.0)
-    except asyncio.CancelledError:
-        pass
-    client._side_effects.clear()
+
+        async def runner():
+            await monitor.run_monitor(bot)
+
+        task = asyncio.create_task(runner())
+        try:
+            await asyncio.wait_for(task, timeout=5.0)
+        except asyncio.CancelledError:
+            pass
+        assert counter["n"] == cycles, "monitor stopped early"
+    finally:
+        monitor._poll_once = real_poll_once
 
 
 @pytest.fixture(autouse=True)
@@ -164,6 +172,10 @@ def monitor_config(monkeypatch):
 
     monkeypatch.setattr(config, "monitor_channel_id", 1544715093491847249)
     monkeypatch.setattr(config, "monitor_user_id", 4242)
+    # Per-directory polling fans out per discovered project; default the
+    # discovery to EMPTY (no projects) so pre-existing tests keep the
+    # exact single-cwd-poll behavior unless they script projects.
+    monkeypatch.setattr(config, "monitor_all_directories", True)
     yield
 
 
@@ -298,3 +310,163 @@ class TestPollLoop:
         embeds = [e for _, e in channel.sent if e is not None]
         assert len(embeds) == 1
         assert "Recovered." in embeds[0].description
+
+
+# ---------------------------------------------------------------------------
+# Per-directory polling (monitor_all_directories)
+# ---------------------------------------------------------------------------
+
+
+def _project(worktree: str) -> dict:
+    return {"worktree": worktree}
+
+
+class TestPerDirectoryPolling:
+    async def test_question_in_directory_posts_embed_with_directory_routing(self):
+        client = ScriptedOpencodeClient()
+        channel = FakeMonitorChannel()
+        bot = FakeMonitorBot(client, channel)
+        client.script("list_projects", *[[_project("C:\\proj\\alpha")]] * 4)
+        # Poll order per cycle: cwd (None) first, then alpha. The busy
+        # session lives in alpha's instance; the cwd poll is empty. The
+        # scripted values repeat every cycle (the queue drains to the
+        # default after exhaustion).
+        client.script(
+            "get_session_status",
+            {},
+            {"sess-a": {"type": "busy"}},
+            {},
+            {"sess-a": {"type": "busy"}},
+            {},
+            {"sess-a": {"type": "busy"}},
+        )
+        q = question_request(rid="q-1", sid="sess-a")
+        client.script("list_questions", [], [q], [], [q], [], [q])
+        client.script("get_session", {"id": "sess-a", "title": "Alpha task"})
+        await _run_cycles(bot, cycles=3)
+        embeds = [e for _, e in channel.sent if e is not None]
+        assert len(embeds) == 1
+        assert "Alpha task" in embeds[0].title
+        # Title fetched WITH the directory routing.
+        assert "C:\\proj\\alpha" in client.directory_calls["get_session"]
+        # Footer carries the project basename label.
+        assert embeds[0].footer.text == "session sess-a · alpha"
+
+    async def test_completion_in_directory_fetches_snippet_with_directory(self):
+        client = ScriptedOpencodeClient()
+        channel = FakeMonitorChannel()
+        bot = FakeMonitorBot(client, channel)
+        client.script("list_projects", *[[_project("C:\\proj\\beta")]] * 5)
+        # Cycle 1: busy in beta's instance. Later cycles: gone (completed).
+        # Poll order per cycle: cwd (None) then beta.
+        client.script(
+            "get_session_status",
+            {},
+            {"sess-b": {"type": "busy"}},
+            {},
+            {},
+            {},
+            {},
+        )
+        client.script("get_session", {"id": "sess-b", "title": "Beta task"})
+        client.script("list_messages", [assistant_message("Beta done.")])
+        await _run_cycles(bot, cycles=4)
+        embeds = [e for _, e in channel.sent if e is not None]
+        assert len(embeds) == 1
+        assert "completed" in embeds[0].title.lower()
+        assert "Beta done." in embeds[0].description
+        assert "C:\\proj\\beta" in client.directory_calls["list_messages"]
+        assert embeds[0].footer.text == "session sess-b · beta"
+
+    async def test_same_rid_via_cwd_and_directory_poll_posts_once(self):
+        client = ScriptedOpencodeClient()
+        channel = FakeMonitorChannel()
+        bot = FakeMonitorBot(client, channel)
+        client.script("list_projects", *[[_project("C:\\proj\\gamma")]] * 4)
+        q = question_request(rid="q-dup", sid="sess-g")
+        # The cwd poll AND the directory poll both return the SAME request.
+        client.script("list_questions", [q], [q], [q], [q], [q], [q])
+        client.script("get_session", {"id": "sess-g", "title": "Gamma"})
+        await _run_cycles(bot, cycles=3)
+        embeds = [e for _, e in channel.sent if e is not None]
+        assert len(embeds) == 1
+
+    async def test_list_projects_failure_falls_back_to_cwd_only(self):
+        client = ScriptedOpencodeClient()
+        channel = FakeMonitorChannel()
+        bot = FakeMonitorBot(client, channel)
+        # list_projects raises on every cycle — monitor must degrade to
+        # cwd-only polling without crashing.
+        client.script_exc("list_projects", RuntimeError("no /project"))
+        q = question_request(rid="q-1", sid="sess-fallback")
+        client.script("list_questions", [q], [], [q], [], [q], [])
+        client.script("get_session", {"id": "sess-fallback", "title": "Cwd task"})
+        await _run_cycles(bot, cycles=2)
+        embeds = [e for _, e in channel.sent if e is not None]
+        assert len(embeds) == 1
+        assert "Cwd task" in embeds[0].title
+        # Only the cwd poll ever ran — no directory params passed.
+        assert client.directory_calls["list_questions"] == [None, None]
+
+    async def test_monitor_all_directories_false_never_calls_list_projects(self):
+        from opencode_discord_bot.config import config
+
+        client = ScriptedOpencodeClient()
+        channel = FakeMonitorChannel()
+        bot = FakeMonitorBot(client, channel)
+        client.script("list_projects", [_project("C:\\proj\\x")])
+        q = question_request(rid="q-1", sid="sess-off")
+        client.script("list_questions", [q], [])
+        client.script("get_session", {"id": "sess-off", "title": "Off"})
+        # Kill-switch ON: the fixture default of True must be overridden.
+        config.monitor_all_directories = False
+        try:
+            await _run_cycles(bot, cycles=2)
+        finally:
+            config.monitor_all_directories = True
+        embeds = [e for _, e in channel.sent if e is not None]
+        assert len(embeds) == 1
+        assert not [c for c in client.calls if c[0] == "list_projects"]
+        # Exactly two cwd-only question polls — no directory fan-out.
+        assert client.directory_calls["list_questions"] == [None, None]
+
+    async def test_root_and_empty_worktrees_filtered_from_discovery(self):
+        client = ScriptedOpencodeClient()
+        channel = FakeMonitorChannel()
+        bot = FakeMonitorBot(client, channel)
+        # "/" (the root pseudo-instance) and "" must not produce polls.
+        client.script(
+            "list_projects",
+            *[[_project("/"), _project(""), _project("C:\\proj\\keep")]] * 3,
+        )
+        client.script("get_session_status", {}, {}, {}, {}, {}, {})
+        await _run_cycles(bot, cycles=2)
+        # Exactly two full cycles x 2 polls (cwd + the one kept directory);
+        # the wrapper cancels AFTER the 2nd completed cycle, so nothing
+        # partial runs after.
+        dirs = client.directory_calls["get_session_status"]
+        assert dirs == [None, "C:\\proj\\keep", None, "C:\\proj\\keep"]
+
+    async def test_router_bound_session_in_directory_still_excluded(self):
+        client = ScriptedOpencodeClient()
+        channel = FakeMonitorChannel()
+        router = FakeRouter({"300": "sess-dir-main"})
+        bot = FakeMonitorBot(client, channel, router=router)
+        client.script("list_projects", *[[_project("C:\\proj\\delta")]] * 5)
+        q = question_request(rid="q-1", sid="sess-dir-main")
+        # cwd poll empty; directory poll carries the bound session's events.
+        client.script("list_questions", [], [q], [], [q], [], [q], [])
+        client.script(
+            "get_session_status",
+            {},
+            {"sess-dir-main": {"type": "busy"}},
+            {},
+            {"sess-dir-main": {"type": "busy"}},
+            {},
+            {"sess-dir-main": {"type": "busy"}},
+            {},
+            {"sess-dir-main": {"type": "busy"}},
+        )
+        client.script("list_permissions", [], [], [], [], [], [], [], [])
+        await _run_cycles(bot, cycles=4)
+        assert channel.sent == []

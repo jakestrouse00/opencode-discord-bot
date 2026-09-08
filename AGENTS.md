@@ -520,9 +520,30 @@ root: `Dockerfile`, `fly.toml`, `fly.env.example`, `start.sh`,
   be duplicate noise. Completion detection: session ids with `busy`/`retry`
   status in `GET /session/status` are tracked; a tracked id leaving the map
   (the server deletes idle entries) = completed — sessions idle at monitor
-  start are never notified. Polls the same three documented GETs the button
+  start are never notified. **Per-directory polling** (since the
+  instance-scoping fix): when `config.monitor_all_directories` (default
+  True, env `MONITOR_ALL_DIRECTORIES`), each cycle discovers the server's
+  known project directories via `GET /project` (`OpencodeClient.list_projects`)
+  and polls the three endpoints once per directory plus the
+  unparameterized cwd poll as a belt-and-braces fallback — the
+  question/permission/status maps are instance-scoped on multi-instance
+  servers, so a bare GET only sees the serve cwd instance. Status maps
+  are UNIONed across directories (sids are globally unique per server, so
+  union never double-tracks); request-id dedup is shared across
+  directories, so the same pending request seen via the cwd poll AND its
+  directory poll posts exactly one embed. Per-directory fetch failures
+  log + skip that directory; a `list_projects` failure logs ONCE and
+  degrades to exact cwd-only legacy behavior (older servers). `"/"` and
+  empty worktrees are filtered from discovery. The first poll to report a
+  sid records it in `state.sid_directory`, and title/message fetches
+  (`get_session` / `list_messages`) route with that directory — session
+  lookups are instance-scoped too. Embed footers append the project
+  basename (`session <sid> · <basename>`) via a naive `/`+`\` split (the
+  Fly container is Linux; Windows worktrees wouldn't split under
+  `os.path.basename`). `monitor_all_directories=False` restores cwd-only
+  polling without a redeploy. Polls the same three documented GETs the button
   UI uses (`get_session_status` + `list_questions` + `list_permissions`,
-  gathered with `return_exceptions=True`) at
+  each gathered per directory with `return_exceptions=True`) at
   `config.monitor_poll_interval_seconds` (default 10s, read per-cycle so
   live tweaks apply) — NOT the SSE stream (known-stale, see
   `OpencodeClient.stream_events`). READ-ONLY BY CONSTRUCTION: never calls
@@ -613,7 +634,7 @@ root: `Dockerfile`, `fly.toml`, `fly.env.example`, `start.sh`,
   `COMULYTIC_MAX_DURATION_MINUTES` / `COMULYTIC_MAX_DURATION_SECONDS` /
   `DASHBOARD_ENABLED` / `DASHBOARD_PORT` / `DASHBOARD_TOKEN` /
   `MONITOR_ENABLED` / `MONITOR_CHANNEL_ID` / `MONITOR_USER_ID` /
-  `MONITOR_POLL_INTERVAL_SECONDS`.
+  `MONITOR_POLL_INTERVAL_SECONDS` / `MONITOR_ALL_DIRECTORIES`.
 - Get the keys at: Discord bot token at
   https://discord.com/developers/applications (Bot tab), OpenAI key at
   https://platform.openai.com/api-keys, Ollama Cloud key at

@@ -37,7 +37,7 @@ Env-var overrides (uppercase of the field name):
   / COMULYTIC_MAX_DURATION_SECONDS
   / DASHBOARD_ENABLED / DASHBOARD_PORT / DASHBOARD_TOKEN
   / MONITOR_ENABLED / MONITOR_CHANNEL_ID / MONITOR_USER_ID
-  / MONITOR_POLL_INTERVAL_SECONDS
+  / MONITOR_POLL_INTERVAL_SECONDS / MONITOR_ALL_DIRECTORIES
 """
 
 from __future__ import annotations
@@ -364,6 +364,13 @@ class BotConfig(BaseSettings):
     # + /permission. 10s is responsive without hammering the server (3
     # cheap GETs per cycle). Read per-cycle so live tweaks apply.
     monitor_poll_interval_seconds: float = 10.0
+    # Whether the monitor fans its polls out across ALL known project
+    # directories (discovered via GET /project each cycle) instead of only
+    # the serve process's cwd instance. The question/permission/status maps
+    # are instance-scoped on multi-instance servers, so without this the
+    # monitor misses desktop sessions opened in other project directories.
+    # False = legacy cwd-only polling (kill-switch for older servers).
+    monitor_all_directories: bool = True
 
 
 # Module-level singleton. Importers read `config.<field>` (NOT a fresh

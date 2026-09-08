@@ -6,10 +6,9 @@ off in the opencode TUI/GUI, or any other prompt against the same
 `opencode serve` instance the bot talks to) are invisible from Discord —
 until they block on a permission or question, when they silently wait
 forever. This module closes that gap: a background poll loop that watches
-the opencode server's GLOBAL endpoints and posts an embed per event to a
-configured Discord channel, so the user can step away and still know when
-they need to come back to approve/answer something, or that a session
-finished.
+the opencode server and posts an embed per event to a configured Discord
+channel, so the user can step away and still know when they need to come
+back to approve/answer something, or that a session finished.
 
 Events surfaced (one embed each):
   - Question pending   — a new request id appears in GET /question for a
@@ -21,10 +20,22 @@ Events surfaced (one embed each):
     session not bound to a Discord channel (green embed with a snippet of
     the final assistant text).
 
+PER-DIRECTORY POLLING: the question/permission/status maps are
+instance-scoped on multi-instance opencode servers — a bare GET only sees
+the serve process's cwd instance. When `config.monitor_all_directories`
+(default True), each cycle discovers the server's known project
+directories via GET /project and polls the three endpoints once per
+directory (plus the unparameterized cwd poll as a belt-and-braces
+fallback). Status maps are UNIONed (session ids are globally unique per
+server, so union is correct); request-id dedup is shared across
+directories, so the same pending request seen via the cwd poll AND its
+directory poll posts exactly one embed.
+
 READ-ONLY BY CONSTRUCTION: the loop only ever calls get_session_status /
-list_questions / list_permissions / get_session / list_messages. It never
-calls reply_question / reject_question / reply_permission / abort_session
-— approvals stay at the desktop; this is visibility, not remote control.
+list_questions / list_permissions / get_session / list_messages /
+list_projects. It never calls reply_question / reject_question /
+reply_permission / abort_session — approvals stay at the desktop; this is
+visibility, not remote control.
 
 Sessions bound in EITHER SessionRouter file (the main bot's
 `.opencode-discord-bot-sessions.json` or the bridge's
@@ -83,7 +94,25 @@ def _snippet(text: str, limit: int = _SNIPPET_MAX) -> str:
     return cut.rstrip() + "…"
 
 
-def question_embed(session_title: str, sid: str, request: dict) -> discord.Embed:
+def _directory_label(directory: str | None) -> str | None:
+    r"""Short project label for embed footers — the basename of the worktree.
+
+    Splits on BOTH `/` and `\`: the bot may run on Linux (Fly) while the
+    server's worktrees are Windows paths, so `os.path.basename` would
+    return the full path. Returns None for empty/None (no label).
+    """
+    if not directory:
+        return None
+    label = directory.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+    return label or None
+
+
+def question_embed(
+    session_title: str,
+    sid: str,
+    request: dict,
+    directory_label: str | None = None,
+) -> discord.Embed:
     """Build the orange 'question pending' embed for one question request."""
     blocks = [question_block(q) for q in (request.get("questions") or [])]
     description = (
@@ -94,12 +123,18 @@ def question_embed(session_title: str, sid: str, request: dict) -> discord.Embed
         description=description,
         color=discord.Color.orange(),
     )
-    embed.set_footer(text=f"session {sid}")
+    footer = f"session {sid}"
+    if directory_label:
+        footer += f" · {directory_label}"
+    embed.set_footer(text=footer)
     return embed
 
 
 def permission_embed(
-    session_title: str, sid: str, request: dict
+    session_title: str,
+    sid: str,
+    request: dict,
+    directory_label: str | None = None,
 ) -> discord.Embed:
     """Build the red 'permission pending' embed for one permission request."""
     embed = discord.Embed(
@@ -107,12 +142,18 @@ def permission_embed(
         description=permission_block(request),
         color=discord.Color.red(),
     )
-    embed.set_footer(text=f"session {sid}")
+    footer = f"session {sid}"
+    if directory_label:
+        footer += f" · {directory_label}"
+    embed.set_footer(text=footer)
     return embed
 
 
 def completion_embed(
-    session_title: str, sid: str, snippet: str
+    session_title: str,
+    sid: str,
+    snippet: str,
+    directory_label: str | None = None,
 ) -> discord.Embed:
     """Build the green 'session completed' embed with a response snippet."""
     description = _snippet(snippet) if snippet else "_(no text output)_"
@@ -121,14 +162,24 @@ def completion_embed(
         description=description,
         color=discord.Color.brand_green(),
     )
-    embed.set_footer(text=f"session {sid}")
+    footer = f"session {sid}"
+    if directory_label:
+        footer += f" · {directory_label}"
+    embed.set_footer(text=footer)
     return embed
 
 
-async def _fetch_title(client: OpencodeClient, sid: str) -> str:
-    """Best-effort session title for embed headers (never raises)."""
+async def _fetch_title(
+    client: OpencodeClient, sid: str, directory: str | None = None
+) -> str:
+    """Best-effort session title for embed headers (never raises).
+
+    `directory` routes the GET to the project instance the session was
+    seen in — session lookups are instance-scoped, so a bare call would
+    miss (or 404) for a sid living in another directory.
+    """
     try:
-        session = await client.get_session(sid)
+        session = await client.get_session(sid, directory=directory)
         if isinstance(session, dict):
             title = session.get("title")
             if title:
@@ -138,10 +189,16 @@ async def _fetch_title(client: OpencodeClient, sid: str) -> str:
     return "(unknown)"
 
 
-async def _fetch_snippet(client: OpencodeClient, sid: str) -> str:
-    """Best-effort final assistant text for a completed session."""
+async def _fetch_snippet(
+    client: OpencodeClient, sid: str, directory: str | None = None
+) -> str:
+    """Best-effort final assistant text for a completed session.
+
+    `directory` routes the GET to the project instance the session was
+    seen in — message lookups are instance-scoped like sessions.
+    """
     try:
-        messages = await client.list_messages(sid)
+        messages = await client.list_messages(sid, directory=directory)
         if isinstance(messages, list):
             return _final_assistant_text(messages)
     except Exception:  # noqa: BLE001 — snippet is cosmetic; never block the loop
@@ -149,10 +206,47 @@ async def _fetch_snippet(client: OpencodeClient, sid: str) -> str:
     return ""
 
 
+async def _discover_directories(
+    client: OpencodeClient, state: _MonitorState
+) -> list[str | None]:
+    """Directories to poll this cycle: `[None]` (the serve cwd instance)
+    plus each known project worktree from `GET /project`.
+
+    `None` first keeps the legacy unparameterized poll as a belt-and-braces
+    fallback (it also covers servers without `/project` — a failure logs
+    ONCE, not per cycle, and returns `[None]` so the monitor degrades to
+    exact legacy behavior). Entries that are empty or `"/"` (the root
+    pseudo-instance) are filtered — they can't host user sessions.
+    """
+    directories: list[str | None] = [None]
+    try:
+        projects = await client.list_projects()
+    except Exception as e:  # noqa: BLE001 — discovery must not kill the loop
+        if not state.projects_warned:
+            _log.warning(
+                "monitor: list_projects failed (%r) — falling back to "
+                "cwd-only polling (this message logs once)",
+                e,
+            )
+            state.projects_warned = True
+        return directories
+    for project in projects or []:
+        if not isinstance(project, dict):
+            continue
+        worktree = project.get("worktree")
+        if not isinstance(worktree, str) or worktree in ("", "/"):
+            continue
+        if worktree not in directories:
+            directories.append(worktree)
+    return directories
+
+
 class _MonitorState:
-    """Mutable per-loop state: seen request ids, busy-session tracking, and
-    the cached notification channel (re-fetched when a send fails — e.g. the
-    channel was deleted and recreated)."""
+    """Mutable per-loop state: seen request ids, busy-session tracking, the
+    cached notification channel (re-fetched when a send fails — e.g. the
+    channel was deleted and recreated), the per-sid directory map (which
+    project instance a session was first seen in — fetches route there),
+    and the one-shot `list_projects` failure flag."""
 
     def __init__(self) -> None:
         self.seen_questions: set[str] = set()
@@ -160,6 +254,11 @@ class _MonitorState:
         # opencode session ids observed busy/retry; completion = the id
         # leaves the status map (the server removes idle sessions).
         self.busy: set[str] = set()
+        # sid -> directory the sid was FIRST seen in (the poll that first
+        # reported it wins; sids are globally unique per server, so there
+        # is exactly one true directory — the map never needs updating).
+        self.sid_directory: dict[str, str] = {}
+        self.projects_warned = False
         self.channel: object | None = None
         self.channel_fetched = False
 
@@ -246,37 +345,77 @@ def _excluded_sids(bot) -> set[str]:
 
 
 async def _poll_once(bot, client: OpencodeClient, state: _MonitorState) -> None:
-    """One monitor cycle: fetch the three global endpoints, post embeds for
-    new events, update busy-session tracking. Never raises — every fetch
-    failure is logged and treated as empty so the loop keeps running."""
-    status_map_result, questions_result, permissions_result = (
-        await asyncio.gather(
-            client.get_session_status(),
-            client.list_questions(),
-            client.list_permissions(),
-            return_exceptions=True,
-        )
+    """One monitor cycle: discover directories, fetch the three endpoints
+    per directory, post embeds for new events, update busy-session
+    tracking. Never raises — every fetch failure is logged and treated as
+    empty so the loop keeps running.
+
+    Status maps are UNIONed across directories (session ids are globally
+    unique per server — a session lives in exactly one instance, so union
+    is correct and never double-tracks). Question/permission request ids
+    dedup against the SHARED seen-sets, so the same pending request seen
+    via the cwd poll AND its directory poll posts exactly one embed.
+    """
+    if config.monitor_all_directories:
+        directories = await _discover_directories(client, state)
+    else:
+        directories: list[str | None] = [None]
+
+    # --- status maps: one GET per directory, unioned ---
+    status_results = await asyncio.gather(
+        *(
+            client.get_session_status(directory=d)
+            for d in directories
+        ),
+        return_exceptions=True,
     )
-    if isinstance(status_map_result, Exception):
-        _log.warning("monitor: get_session_status failed: %r", status_map_result)
-        status_map: dict = {}
-    else:
-        status_map = status_map_result or {}
-    if isinstance(questions_result, Exception):
-        _log.warning("monitor: list_questions failed: %r", questions_result)
-        questions: list = []
-    else:
-        questions = questions_result or []
-    if isinstance(permissions_result, Exception):
-        _log.warning("monitor: list_permissions failed: %r", permissions_result)
-        permissions: list = []
-    else:
-        permissions = permissions_result or []
+    status_map: dict = {}
+    for d, result in zip(directories, status_results):
+        if isinstance(result, BaseException):
+            _log.warning(
+                "monitor: get_session_status(directory=%r) failed: %r", d, result
+            )
+            continue
+        for sid, status in (result or {}).items():
+            # First poll to report a sid wins the directory mapping (the
+            # cwd poll and the true directory's poll both see cwd sids —
+            # identical state, either entry is correct).
+            if sid not in state.sid_directory and d is not None:
+                state.sid_directory[sid] = d
+            status_map.setdefault(sid, status)
+
+    # --- question + permission requests: one GET per directory ---
+    question_results = await asyncio.gather(
+        *(client.list_questions(directory=d) for d in directories),
+        return_exceptions=True,
+    )
+    permission_results = await asyncio.gather(
+        *(client.list_permissions(directory=d) for d in directories),
+        return_exceptions=True,
+    )
+    questions: list = []
+    for d, result in zip(directories, question_results):
+        if isinstance(result, BaseException):
+            _log.warning(
+                "monitor: list_questions(directory=%r) failed: %r", d, result
+            )
+            continue
+        for req in result or []:
+            questions.append((d, req))
+    permissions: list = []
+    for d, result in zip(directories, permission_results):
+        if isinstance(result, BaseException):
+            _log.warning(
+                "monitor: list_permissions(directory=%r) failed: %r", d, result
+            )
+            continue
+        for req in result or []:
+            permissions.append((d, req))
 
     excluded = _excluded_sids(bot)
 
     # --- question + permission events (new, non-excluded request ids) ---
-    for req in questions:
+    for d, req in questions:
         if not isinstance(req, dict):
             continue
         rid = req.get("id", "")
@@ -284,10 +423,15 @@ async def _poll_once(bot, client: OpencodeClient, state: _MonitorState) -> None:
         if not rid or rid in state.seen_questions or sid in excluded:
             continue
         state.seen_questions.add(rid)
-        title = await _fetch_title(client, sid)
-        await _post(bot, state, question_embed(title, sid, req))
+        directory = d if d is not None else state.sid_directory.get(sid)
+        title = await _fetch_title(client, sid, directory)
+        await _post(
+            bot,
+            state,
+            question_embed(title, sid, req, _directory_label(directory)),
+        )
 
-    for req in permissions:
+    for d, req in permissions:
         if not isinstance(req, dict):
             continue
         rid = req.get("id", "")
@@ -295,8 +439,13 @@ async def _poll_once(bot, client: OpencodeClient, state: _MonitorState) -> None:
         if not rid or rid in state.seen_permissions or sid in excluded:
             continue
         state.seen_permissions.add(rid)
-        title = await _fetch_title(client, sid)
-        await _post(bot, state, permission_embed(title, sid, req))
+        directory = d if d is not None else state.sid_directory.get(sid)
+        title = await _fetch_title(client, sid, directory)
+        await _post(
+            bot,
+            state,
+            permission_embed(title, sid, req, _directory_label(directory)),
+        )
 
     # --- completion events (tracked busy sessions that left the map) ---
     # A session counts as running when its status entry is "busy" or
@@ -318,9 +467,14 @@ async def _poll_once(bot, client: OpencodeClient, state: _MonitorState) -> None:
             state.busy.discard(sid)
             if sid in excluded:
                 continue
-            title = await _fetch_title(client, sid)
-            snippet = await _fetch_snippet(client, sid)
-            await _post(bot, state, completion_embed(title, sid, snippet))
+            directory = state.sid_directory.get(sid)
+            title = await _fetch_title(client, sid, directory)
+            snippet = await _fetch_snippet(client, sid, directory)
+            await _post(
+                bot,
+                state,
+                completion_embed(title, sid, snippet, _directory_label(directory)),
+            )
 
 
 async def run_monitor(bot) -> None:

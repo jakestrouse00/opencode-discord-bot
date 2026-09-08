@@ -321,6 +321,7 @@ Sessions idle when the bot starts are never notified (no restart spam).
 | `MONITOR_CHANNEL_ID` | `1544715093491847249` | The channel the embeds go to |
 | `MONITOR_USER_ID` | `0` | Your Discord user id — @mentioned in each embed's content so your phone buzzes (0 = no mention) |
 | `MONITOR_POLL_INTERVAL_SECONDS` | `10` | Poll cadence for the status/question/permission GETs |
+| `MONITOR_ALL_DIRECTORIES` | `true` | Poll every known project directory (via `GET /project`), not just the serve cwd — so desktop sessions in any project notify. `false` = cwd-only |
 
 On Fly, the monitor watches your desktop `opencode serve` over the same
 Tailscale tunnel the rest of the bot uses. Set

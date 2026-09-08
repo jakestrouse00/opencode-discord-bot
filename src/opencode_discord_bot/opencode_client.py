@@ -272,7 +272,9 @@ class OpencodeClient:
             directory=directory,
         )
 
-    async def get_session_status(self) -> dict[str, dict]:
+    async def get_session_status(
+        self, *, directory: str | None = None
+    ) -> dict[str, dict]:
         """GET /session/status — ``{ sessionID: SessionStatus }``.
 
         Each value is a ``SessionStatus`` object whose ``type`` is one of
@@ -280,9 +282,25 @@ class OpencodeClient:
         means that session is idle (the server removes idle entries from the
         status map). See ``packages/schema/src/session-status-event.ts`` and
         ``packages/opencode/src/server/routes/instance/httpapi/groups/session.ts``.
+
+        ``directory`` routes the request to that project instance (the
+        status map is instance-scoped on multi-instance servers).
         """
-        result = await self._request("GET", "/session/status")
+        result = await self._request(
+            "GET", "/session/status", directory=directory
+        )
         return result if isinstance(result, dict) else {}
+
+    async def list_projects(self) -> list[dict]:
+        """GET /project — the server's known project instances.
+
+        Each entry is a ``Project`` (``{ worktree, vcs?, ... }``) per
+        ``packages/schema/src/v1/project.ts``. The session monitor uses the
+        ``worktree`` values as the directory fan-out for its per-instance
+        polls (question/permission/status maps are instance-scoped).
+        """
+        result = await self._request("GET", "/project")
+        return result if isinstance(result, list) else []
 
     # --- messages ---
 
@@ -428,14 +446,19 @@ class OpencodeClient:
 
     # --- questions ---
 
-    async def list_questions(self) -> list[dict]:
+    async def list_questions(
+        self, *, directory: str | None = None
+    ) -> list[dict]:
         """GET /question — all pending question requests across sessions.
 
         Each entry is a ``Request`` (``{ id, sessionID, questions: Info[], tool? }``)
         per ``packages/schema/src/v1/question.ts``. The bot filters by
         ``sessionID`` to surface only those for the session it's driving.
+
+        ``directory`` routes the request to that project instance (the
+        pending-question map is instance-scoped on multi-instance servers).
         """
-        result = await self._request("GET", "/question")
+        result = await self._request("GET", "/question", directory=directory)
         return result if isinstance(result, list) else []
 
     async def reply_question(self, request_id: str, answers: list[list[str]]) -> bool:
@@ -462,13 +485,19 @@ class OpencodeClient:
 
     # --- permissions ---
 
-    async def list_permissions(self) -> list[dict]:
+    async def list_permissions(
+        self, *, directory: str | None = None
+    ) -> list[dict]:
         """GET /permission — all pending permission requests across sessions.
 
         Each entry is a ``Request`` (``{ id, sessionID, permission, patterns,
-        metadata, always, tool? }``) per ``packages/schema/src/v1/permission.ts``.
+        metadata, always, tool? }``) per
+        ``packages/schema/src/v1/permission.ts``.
+
+        ``directory`` routes the request to that project instance (the
+        pending-permission map is instance-scoped on multi-instance servers).
         """
-        result = await self._request("GET", "/permission")
+        result = await self._request("GET", "/permission", directory=directory)
         return result if isinstance(result, list) else []
 
     async def reply_permission(

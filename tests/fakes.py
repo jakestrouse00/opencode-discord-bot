@@ -104,7 +104,7 @@ class ScriptedOpencodeClient(_ScriptedClient):
     _methods = frozenset({
         "health", "list_sessions", "create_session", "get_session",
         "delete_session", "abort_session", "revert_session",
-        "get_session_status", "list_messages", "send_message",
+        "get_session_status", "list_projects", "list_messages", "send_message",
         "send_prompt_async", "list_questions", "reply_question",
         "reject_question", "list_permissions", "reply_permission",
         "list_agents", "aclose",
@@ -116,6 +116,10 @@ class ScriptedOpencodeClient(_ScriptedClient):
         self.last_prompt_parts: list[dict] | None = None
         self.last_agent: str | None = None
         self._next_session_id = 1000
+        # Per-method list of directory kwargs actually passed by callers —
+        # tests assert on these to verify per-directory routing. Cleared
+        # manually when a test needs to.
+        self.directory_calls: dict[str, list[str | None]] = defaultdict(list)
 
     def _default_for(self, method: str) -> Any:
         if method == "create_session":
@@ -127,6 +131,8 @@ class ScriptedOpencodeClient(_ScriptedClient):
         if method == "list_questions":
             return []
         if method == "list_permissions":
+            return []
+        if method == "list_projects":
             return []
         if method == "list_messages":
             return []
@@ -167,8 +173,9 @@ class ScriptedOpencodeClient(_ScriptedClient):
             self.last_sid = result["id"]
         return result
 
-    async def get_session(self, sid):
-        self._record("get_session", (sid,), {})
+    async def get_session(self, sid, directory=None):
+        self._record("get_session", (sid,), {"directory": directory})
+        self.directory_calls["get_session"].append(directory)
         self._fire_side_effects("get_session")
         return self._next("get_session")
 
@@ -187,13 +194,20 @@ class ScriptedOpencodeClient(_ScriptedClient):
         self._fire_side_effects("revert_session")
         return self._next("revert_session")
 
-    async def get_session_status(self):
-        self._record("get_session_status", (), {})
+    async def get_session_status(self, directory=None):
+        self._record("get_session_status", (), {"directory": directory})
+        self.directory_calls["get_session_status"].append(directory)
         self._fire_side_effects("get_session_status")
         return self._next("get_session_status")
 
-    async def list_messages(self, sid, limit=None):
-        self._record("list_messages", (sid,), {"limit": limit})
+    async def list_projects(self):
+        self._record("list_projects", (), {})
+        self._fire_side_effects("list_projects")
+        return self._next("list_projects")
+
+    async def list_messages(self, sid, limit=None, directory=None):
+        self._record("list_messages", (sid,), {"limit": limit, "directory": directory})
+        self.directory_calls["list_messages"].append(directory)
         self._fire_side_effects("list_messages")
         return self._next("list_messages")
 
@@ -210,8 +224,9 @@ class ScriptedOpencodeClient(_ScriptedClient):
         self._fire_side_effects("send_prompt_async")
         return self._next("send_prompt_async")
 
-    async def list_questions(self):
-        self._record("list_questions", (), {})
+    async def list_questions(self, directory=None):
+        self._record("list_questions", (), {"directory": directory})
+        self.directory_calls["list_questions"].append(directory)
         self._fire_side_effects("list_questions")
         return self._next("list_questions")
 
@@ -225,8 +240,9 @@ class ScriptedOpencodeClient(_ScriptedClient):
         self._fire_side_effects("reject_question")
         return self._next("reject_question")
 
-    async def list_permissions(self):
-        self._record("list_permissions", (), {})
+    async def list_permissions(self, directory=None):
+        self._record("list_permissions", (), {"directory": directory})
+        self.directory_calls["list_permissions"].append(directory)
         self._fire_side_effects("list_permissions")
         return self._next("list_permissions")
 
