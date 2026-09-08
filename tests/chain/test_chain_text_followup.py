@@ -30,7 +30,7 @@ def followup_config(monkeypatch):
 
 
 async def test_chain_text_followup_drives_session(
-    bot_instance, followup_config, monkeypatch
+        bot_instance, followup_config, monkeypatch
 ):
     """Plain-text follow-up in a session channel -> opencode drive -> final posted."""
     sid = "sid-text"
@@ -45,14 +45,14 @@ async def test_chain_text_followup_drives_session(
     # Script opencode: prompt, busy->idle, no questions, final.
     bot_instance.client.script("send_prompt_async", None)
     bot_instance.client.script("get_session_status",
-                                {sid: {"type": "busy"}},
-                                {sid: {"type": "idle"}})
+                               {sid: {"type": "busy"}},
+                               {sid: {"type": "idle"}})
     bot_instance.client.script("list_questions", [], [])
     bot_instance.client.script("list_permissions", [], [])
     user_msg = {"info": {"role": "user", "id": "u-1"}, "parts": [{"type": "text", "text": "x"}]}
     bot_instance.client.script("list_messages",
-                                [user_msg],
-                                [assistant_message("REFINED PLAN", mid="m-1")])
+                               [user_msg],
+                               [assistant_message("REFINED PLAN", mid="m-1")])
 
     await bot_instance.on_message(msg)
 
@@ -62,11 +62,11 @@ async def test_chain_text_followup_drives_session(
     assert prompt_calls[0][2]["agent"] is None
     # The final response was posted to the channel.
     final_posts = [c for c, _ in ch.sent if c and "REFINED PLAN" in c]
-    assert final_posts, f"final not posted; sent: {[c for c,_ in ch.sent]}"
+    assert final_posts, f"final not posted; sent: {[c for c, _ in ch.sent]}"
 
 
 async def test_chain_text_followup_with_question_answered_via_button(
-    bot_instance, followup_config, monkeypatch
+        bot_instance, followup_config, monkeypatch
 ):
     """Text follow-up where oc-assistant asks a question; user answers via button."""
     sid = "sid-q"
@@ -80,23 +80,24 @@ async def test_chain_text_followup_with_question_answered_via_button(
 
     bot_instance.client.script("send_prompt_async", None)
     bot_instance.client.script("get_session_status",
-                                {sid: {"type": "busy"}},
-                                {sid: {"type": "idle"}})
+                               {sid: {"type": "busy"}},
+                               {sid: {"type": "idle"}})
     # First poll: one question. Second+ polls: empty.
     bot_instance.client.script("list_questions",
-                                [question_request(rid="q-1", sid=sid)],
-                                [],
-                                [])
+                               [question_request(rid="q-1", sid=sid)],
+                               [],
+                               [])
     bot_instance.client.script("list_permissions", [], [], [])
     bot_instance.client.script("reply_question", True)
     user_msg = {"info": {"role": "user", "id": "u-1"}, "parts": [{"type": "text", "text": "x"}]}
     bot_instance.client.script("list_messages",
-                                [user_msg],
-                                [assistant_message("FINAL WITH Q", mid="m-1")])
+                               [user_msg],
+                               [assistant_message("FINAL WITH Q", mid="m-1")])
 
     # Stop the poller after reply_question fires.
     async def _stop_after_reply(*a, **kw):
         await asyncio.sleep(0.05)
+
     # The poller's stop_event is internal to _drive_session; we instead let
     # the drive finish naturally (status -> idle) and the poller will be
     # stopped by _drive_session's finally.

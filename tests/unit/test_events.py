@@ -40,7 +40,7 @@ async def test_never_busy_grace_elapsed_returns_idle():
     events_mod._BUSY_GRACE_SECONDS = 0.0
     try:
         result = await poll_until_idle(client, "sid-1", lambda s: asyncio.sleep(0),
-                                        interval=0.0, timeout=5)
+                                       interval=0.0, timeout=5)
         assert result["type"] == "idle"
     finally:
         events_mod._BUSY_GRACE_SECONDS = orig
@@ -78,6 +78,7 @@ async def test_timeout_raises_timeouterror():
         if method == "get_session_status":
             return {"sid-1": {"type": "busy"}}
         return None
+
     client._default_for = _busy_default
     with pytest.raises(asyncio.TimeoutError):
         await poll_until_idle(client, "sid-1", lambda s: asyncio.sleep(0),
@@ -110,7 +111,7 @@ async def test_status_fetch_exception_swallowed():
                       {"sid-1": {"type": "busy"}},
                       {"sid-1": {"type": "idle"}})
     result = await poll_until_idle(client, "sid-1", lambda s: asyncio.sleep(0),
-                                    interval=0.0, timeout=10)
+                                   interval=0.0, timeout=10)
     assert result["type"] == "idle"
 
 

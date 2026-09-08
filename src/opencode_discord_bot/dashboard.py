@@ -132,9 +132,9 @@ async def api_stats(request: Request) -> JSONResponse:
     if not _authorized(request):
         return _unauthorized()
     max_cap = (
-        config.comulytic_max_duration_hours * 3600
-        + config.comulytic_max_duration_minutes * 60
-        + config.comulytic_max_duration_seconds
+            config.comulytic_max_duration_hours * 3600
+            + config.comulytic_max_duration_minutes * 60
+            + config.comulytic_max_duration_seconds
     )
     payload: dict[str, Any] = {
         "uptime_s": round(dashboard_state.uptime_seconds(), 1),
@@ -226,9 +226,9 @@ async def api_config(request: Request) -> JSONResponse:
         applied["comulytic_poll_page_size"] = value
 
     for field, lo, hi in (
-        ("comulytic_max_duration_hours", 0, 24),
-        ("comulytic_max_duration_minutes", 0, 59),
-        ("comulytic_max_duration_seconds", 0, 59),
+            ("comulytic_max_duration_hours", 0, 24),
+            ("comulytic_max_duration_minutes", 0, 59),
+            ("comulytic_max_duration_seconds", 0, 59),
     ):
         if field in body:
             value = body[field]

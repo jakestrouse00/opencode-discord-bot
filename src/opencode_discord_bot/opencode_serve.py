@@ -124,6 +124,7 @@ if sys.platform == "win32":
     _PVOID = ctypes.c_void_p
     _ULONGLONG = ctypes.c_ulonglong
 
+
     class _JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
         _fields_ = [
             ("PerProcessUserTimeLimit", wintypes.LARGE_INTEGER),
@@ -137,6 +138,7 @@ if sys.platform == "win32":
             ("SchedulingClass", wintypes.DWORD),
         ]
 
+
     class _IO_COUNTERS(ctypes.Structure):
         _fields_ = [
             ("ReadOperationCount", _ULONGLONG),
@@ -147,6 +149,7 @@ if sys.platform == "win32":
             ("OtherTransferCount", _ULONGLONG),
         ]
 
+
     class _JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
         _fields_ = [
             ("BasicLimitInformation", _JOBOBJECT_BASIC_LIMIT_INFORMATION),
@@ -156,6 +159,7 @@ if sys.platform == "win32":
             ("PeakProcessMemoryUsed", _SIZE_T),
             ("PeakJobMemoryUsed", _SIZE_T),
         ]
+
 
     # Keep a module-level ref so the job handle isn't GC'd (which would close it
     # prematurely and kill the child before the parent exits).
@@ -210,15 +214,15 @@ class OpencodeServe:
     """
 
     def __init__(
-        self,
-        *,
-        port: int | None = None,
-        hostname: str | None = None,
-        cors: Sequence[str] | None = None,
-        startup_timeout: float | None = None,
-        enabled: bool | None = None,
-        password: str | None = None,
-        cwd: str | None = None,
+            self,
+            *,
+            port: int | None = None,
+            hostname: str | None = None,
+            cors: Sequence[str] | None = None,
+            startup_timeout: float | None = None,
+            enabled: bool | None = None,
+            password: str | None = None,
+            cwd: str | None = None,
     ) -> None:
         self._port = port if port is not None else config.opencode_serve_port
         self._hostname = (
@@ -340,8 +344,8 @@ class OpencodeServe:
             # New process group so CTRL_BREAK_EVENT reaches the tree. The
             # CREATE_NO_WINDOW flag suppresses a flashing console window.
             popen_kwargs["creationflags"] = (
-                subprocess.CREATE_NEW_PROCESS_GROUP
-                | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                    subprocess.CREATE_NEW_PROCESS_GROUP
+                    | getattr(subprocess, "CREATE_NO_WINDOW", 0)
             )
         else:
             popen_kwargs["start_new_session"] = True
@@ -378,7 +382,7 @@ class OpencodeServe:
     def _auth_header(self) -> str:
         """Basic-auth header value for the configured password."""
         return (
-            "Basic " + base64.b64encode(f"opencode:{self._password}".encode()).decode()
+                "Basic " + base64.b64encode(f"opencode:{self._password}".encode()).decode()
         )
 
     @staticmethod

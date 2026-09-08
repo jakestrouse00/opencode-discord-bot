@@ -376,7 +376,7 @@ async def run_bridge() -> None:
                 _log.error("poll cycle failed: %s", exc)
                 dashboard_state.set_poll_result(f"error: {exc}")
             except (
-                Exception
+                    Exception
             ):  # noqa: BLE001 — a poll cycle crash must not kill the bridge
                 _log.exception("poll cycle crashed (continuing)")
                 dashboard_state.set_poll_result("crashed")
@@ -459,7 +459,7 @@ async def _probe_openapi_visibility(comulytic: ComulyticClient) -> None:
 
 
 async def _apply_pending_actions(
-    comulytic: ComulyticClient, seen: set[str], state_path: str
+        comulytic: ComulyticClient, seen: set[str], state_path: str
 ) -> None:
     """Consume a dashboard-queued seen-set action, if any.
 
@@ -493,14 +493,14 @@ async def _apply_pending_actions(
 
 
 async def poll_once(
-    comulytic: ComulyticClient,
-    opencode: OpencodeClient,
-    seen: set[str],
-    bootstrapped: bool,
-    state_path: str,
-    *,
-    rest: DiscordRest | None = None,
-    router: SessionRouter | None = None,
+        comulytic: ComulyticClient,
+        opencode: OpencodeClient,
+        seen: set[str],
+        bootstrapped: bool,
+        state_path: str,
+        *,
+        rest: DiscordRest | None = None,
+        router: SessionRouter | None = None,
 ) -> bool:
     """One poll cycle. Returns the (possibly updated) `bootstrapped` flag.
 
@@ -620,7 +620,7 @@ async def poll_once(
             dashboard_state.clear_in_flight()
             continue
         except (
-            Exception
+                Exception
         ):  # noqa: BLE001 — one recording's crash must not kill the cycle
             _log.exception("recording %s crashed (continuing)", note_id)
             dashboard_state.record_failed()
@@ -672,7 +672,7 @@ async def _enumerate_all_note_ids(comulytic: ComulyticClient, total: int) -> lis
 
 
 async def _enumerate_new_note_ids(
-    comulytic: ComulyticClient, total: int, page_size: int, seen: set[str]
+        comulytic: ComulyticClient, total: int, page_size: int, seen: set[str]
 ) -> tuple[list[str], list[str]]:
     """Enumerate pages 1..ceil(total/page_size) and return `(new_ids, all_observed_ids)`.
 
@@ -744,12 +744,12 @@ async def _is_note_audio_delivered(comulytic: ComulyticClient, note_id: str) -> 
 
 
 async def process_new_recording(
-    comulytic: ComulyticClient,
-    opencode: OpencodeClient,
-    note_id: str,
-    *,
-    rest: DiscordRest | None = None,
-    router: SessionRouter | None = None,
+        comulytic: ComulyticClient,
+        opencode: OpencodeClient,
+        note_id: str,
+        *,
+        rest: DiscordRest | None = None,
+        router: SessionRouter | None = None,
 ) -> dict:
     """The per-recording pipeline. Returns `{note_id, transcript, session_id, response}`.
 
@@ -789,13 +789,13 @@ async def process_new_recording(
 
 
 async def _transcribe_and_route(
-    comulytic: ComulyticClient,
-    opencode: OpencodeClient,
-    note_id: str,
-    detail: dict | None,
-    *,
-    rest: DiscordRest | None = None,
-    router: SessionRouter | None = None,
+        comulytic: ComulyticClient,
+        opencode: OpencodeClient,
+        note_id: str,
+        detail: dict | None,
+        *,
+        rest: DiscordRest | None = None,
+        router: SessionRouter | None = None,
 ) -> dict:
     """Download audio + local Whisper STT, then route the transcript to oc-assistant.
 
@@ -845,9 +845,9 @@ async def _transcribe_and_route(
     # Fail-open: if the probe can't determine duration (ffprobe missing,
     # corrupt bytes, empty output), transcribe as the existing path does.
     cap = (
-        config.comulytic_max_duration_hours * 3600
-        + config.comulytic_max_duration_minutes * 60
-        + config.comulytic_max_duration_seconds
+            config.comulytic_max_duration_hours * 3600
+            + config.comulytic_max_duration_minutes * 60
+            + config.comulytic_max_duration_seconds
     )
     if cap > 0:
         from opencode_discord_bot.voice import probe_audio_duration_seconds
@@ -908,7 +908,7 @@ async def _transcribe_and_route(
 
 
 async def download_audio_smart(
-    comulytic: ComulyticClient, note_id: str, detail: dict
+        comulytic: ComulyticClient, note_id: str, detail: dict
 ) -> bytes:
     """Audio-download picker.
 
@@ -990,10 +990,10 @@ def _status_to_progress_text(status: dict) -> str:
 
 
 async def _rename_when_slug_ready(
-    rest: DiscordRest,
-    channel_id: int,
-    prompt: str,
-    fallback: str,
+        rest: DiscordRest,
+        channel_id: int,
+        prompt: str,
+        fallback: str,
 ) -> None:
     """Generate an LLM slug from `prompt` and rename the Discord channel to it.
 
@@ -1022,12 +1022,12 @@ async def _rename_when_slug_ready(
 
 
 async def route_to_assistant(
-    opencode: OpencodeClient,
-    transcript: str,
-    note_id: str,
-    *,
-    rest: DiscordRest | None = None,
-    router: SessionRouter | None = None,
+        opencode: OpencodeClient,
+        transcript: str,
+        note_id: str,
+        *,
+        rest: DiscordRest | None = None,
+        router: SessionRouter | None = None,
 ) -> dict:
     """Route `transcript` to opencode's `oc-assistant` agent.
 
@@ -1083,10 +1083,10 @@ async def route_to_assistant(
 
     # --- Discord surface gate ---
     discord_active = (
-        rest is not None
-        and router is not None
-        and bool(config.discord_bot_token)
-        and config.discord_bot_guild_id != 0
+            rest is not None
+            and router is not None
+            and bool(config.discord_bot_token)
+            and config.discord_bot_guild_id != 0
     )
     channel_id: int | None = None
     if not discord_active:
@@ -1174,7 +1174,7 @@ async def route_to_assistant(
             transcript_header = f"**Transcribed prompt (note `{note_id}`):**\n```\n"
             transcript_footer = "\n```"
             for chunk in _split_message(
-                transcript_header + transcript + transcript_footer
+                    transcript_header + transcript + transcript_footer
             ):
                 try:
                     await rest.create_message(channel_id, chunk)
@@ -1256,11 +1256,11 @@ async def route_to_assistant(
     async def _on_status(status: dict) -> None:
         text = _status_to_progress_text(status)
         if (
-            not text
-            or progress_msg_id is None
-            or rest is None
-            or channel_id is None
-            or not discord_active
+                not text
+                or progress_msg_id is None
+                or rest is None
+                or channel_id is None
+                or not discord_active
         ):
             _log.debug("session %s status: %s", sid, status)
             return

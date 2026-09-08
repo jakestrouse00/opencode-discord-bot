@@ -56,6 +56,7 @@ async def test_post_endpoints_hit_correct_paths(method, expected_path, expected_
 async def test_create_text_channel_returns_id():
     def handler(request):
         return httpx.Response(200, json={"id": 12345, "name": "test"})
+
     transport = httpx.MockTransport(handler)
     rest = _make(transport)
     try:
@@ -68,6 +69,7 @@ async def test_create_text_channel_returns_id():
 async def test_create_message_returns_id():
     def handler(request):
         return httpx.Response(200, json={"id": 999})
+
     transport = httpx.MockTransport(handler)
     rest = _make(transport)
     try:
@@ -80,6 +82,7 @@ async def test_create_message_returns_id():
 async def test_list_messages_returns_list():
     def handler(request):
         return httpx.Response(200, json=[{"id": "1"}, {"id": "2"}])
+
     transport = httpx.MockTransport(handler)
     rest = _make(transport)
     try:
@@ -92,6 +95,7 @@ async def test_list_messages_returns_list():
 async def test_non_2xx_raises_discordresterror():
     def handler(request):
         return httpx.Response(403, text="forbidden")
+
     transport = httpx.MockTransport(handler)
     rest = _make(transport)
     try:
@@ -104,6 +108,7 @@ async def test_non_2xx_raises_discordresterror():
 async def test_204_returns_empty_dict():
     def handler(request):
         return httpx.Response(204)
+
     transport = httpx.MockTransport(handler)
     rest = _make(transport)
     try:
@@ -135,6 +140,7 @@ async def test_429_retries_once_then_succeeds():
 async def test_429_twice_raises():
     def handler(request):
         return httpx.Response(429, headers={"Retry-After": "0.01"})
+
     transport = httpx.MockTransport(handler)
     rest = _make(transport)
     try:

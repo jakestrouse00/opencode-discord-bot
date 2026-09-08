@@ -267,8 +267,8 @@ async def test_run_followup_drives_session_and_posts_final(bot_instance, monkeyp
     bot_instance.client.script("list_questions", [], [])  # no questions during drive
     bot_instance.client.script("list_permissions", [], [])
     bot_instance.client.script("get_session_status",
-                                {"sid-followup": {"type": "busy"}},
-                                {"sid-followup": {"type": "idle"}})
+                               {"sid-followup": {"type": "busy"}},
+                               {"sid-followup": {"type": "idle"}})
     bot_instance.client.script("list_messages", [assistant_message("FINAL PLAN", mid="m-1")])
     # list_messages for _fetch_last_user_message_id (before the drive).
     # _fetch_last_user_message_id retries up to 3x; script it to return a user msg.
@@ -281,4 +281,4 @@ async def test_run_followup_drives_session_and_posts_final(bot_instance, monkeyp
     await bot_instance._run_followup(msg, "sid-followup")
     # The final text was posted to the channel.
     final_texts = [c for c, _ in ch.sent if c and "FINAL PLAN" in c]
-    assert final_texts, f"final text not posted; sent: {[c for c,_ in ch.sent]}"
+    assert final_texts, f"final text not posted; sent: {[c for c, _ in ch.sent]}"

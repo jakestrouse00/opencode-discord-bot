@@ -200,14 +200,14 @@ class ComulyticClient:
     """
 
     def __init__(
-        self,
-        base_url: str,
-        jwt: str,
-        user_agent: str,
-        *,
-        web_base: str = "https://web.comulytic.ai",
-        refresh_token: str = "",
-        timeout: float = 30.0,
+            self,
+            base_url: str,
+            jwt: str,
+            user_agent: str,
+            *,
+            web_base: str = "https://web.comulytic.ai",
+            refresh_token: str = "",
+            timeout: float = 30.0,
     ) -> None:
         if not jwt:
             raise ComulyticError("jwt is empty — cannot construct ComulyticClient")
@@ -269,13 +269,13 @@ class ComulyticClient:
     # --- low-level request ---
 
     async def _request(
-        self,
-        method: str,
-        path: str,
-        *,
-        params: dict | None = None,
-        json_body: dict | None = None,
-        extra_headers: dict | None = None,
+            self,
+            method: str,
+            path: str,
+            *,
+            params: dict | None = None,
+            json_body: dict | None = None,
+            extra_headers: dict | None = None,
     ) -> dict:
         """Inject mandatory headers + Bearer, send the request, parse JSON.
 
@@ -317,13 +317,13 @@ class ComulyticClient:
             remaining = resp.headers.get("x-ratelimit-remaining")
             reset_ = resp.headers.get("x-ratelimit-reset")
             if attempt == 0 and (
-                resp.status_code == 429
-                or retry_after is not None
-                or (
-                    remaining is not None
-                    and remaining.isdigit()
-                    and int(remaining) < 10
-                )
+                    resp.status_code == 429
+                    or retry_after is not None
+                    or (
+                            remaining is not None
+                            and remaining.isdigit()
+                            and int(remaining) < 10
+                    )
             ):
                 wait = _retry_sleep(resp=resp)
                 _log.warning(
@@ -367,13 +367,13 @@ class ComulyticClient:
     # --- recordings catalog ---
 
     async def list_recordings(
-        self,
-        page: int = 1,
-        page_size: int = 20,
-        *,
-        trash: bool = False,
-        dir_id: str = "",
-        trans_success: bool | None = None,
+            self,
+            page: int = 1,
+            page_size: int = 20,
+            *,
+            trash: bool = False,
+            dir_id: str = "",
+            trans_success: bool | None = None,
     ) -> dict:
         """`POST /api/kirby/v2/note/paging` — offset pagination, page 1 = newest.
 
@@ -449,7 +449,7 @@ class ComulyticClient:
     # --- audio download (Path B PRIMARY, Path A FALLBACK) ---
 
     async def download_audio_proxy(
-        self, note_id: str, *, max_bytes: int = _MAX_AUDIO_BYTES
+            self, note_id: str, *, max_bytes: int = _MAX_AUDIO_BYTES
     ) -> bytes:
         """Path B (PRIMARY): `GET {web_base}/api/note/audio-range/{note_id}`.
 
@@ -491,7 +491,7 @@ class ComulyticClient:
         total = 0
         for _hop in range(5):
             async with self._client.stream(
-                "GET", url, headers=headers, cookies=auth_cookie
+                    "GET", url, headers=headers, cookies=auth_cookie
             ) as resp:
                 if resp.status_code in (301, 302, 303, 307, 308):
                     location = resp.headers.get("Location")
@@ -520,7 +520,7 @@ class ComulyticClient:
         )
 
     async def download_audio_presigned(
-        self, url: str, *, max_bytes: int = _MAX_AUDIO_BYTES
+            self, url: str, *, max_bytes: int = _MAX_AUDIO_BYTES
     ) -> bytes:
         """Path A (FALLBACK): `GET <presigned S3 url>` with `Range: bytes=0-`.
 

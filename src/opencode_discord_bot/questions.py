@@ -68,9 +68,9 @@ class CustomAnswerModal(ui.Modal):
     """
 
     def __init__(
-        self,
-        title: str,
-        on_submit: Callable[[str], Awaitable[None]],
+            self,
+            title: str,
+            on_submit: Callable[[str], Awaitable[None]],
     ) -> None:
         super().__init__(title=title[:45])
         self._on_submit = on_submit
@@ -143,10 +143,10 @@ class QuestionView(ui.View):
     _MAX_RENDERED_QUESTIONS = 3
 
     def __init__(
-        self,
-        request: dict,
-        on_submit: Callable[[list[list[str]]], Awaitable[None]],
-        on_reject: Callable[[], Awaitable[None]],
+            self,
+            request: dict,
+            on_submit: Callable[[list[list[str]]], Awaitable[None]],
+            on_reject: Callable[[], Awaitable[None]],
     ) -> None:
         super().__init__(timeout=None)
         self._request_id = request.get("id", "")
@@ -192,8 +192,8 @@ class QuestionView(ui.View):
                 )
 
                 def _cb(
-                    _interaction: discord.Interaction,
-                    _label: str = opt.get("label", ""),
+                        _interaction: discord.Interaction,
+                        _label: str = opt.get("label", ""),
                 ) -> Any:
                     return self._submit_single(_label)
 
@@ -285,9 +285,9 @@ class QuestionView(ui.View):
             )
 
             def _cb(
-                interaction: discord.Interaction,
-                _idx: int = idx,
-                _select: ui.Select = select,
+                    interaction: discord.Interaction,
+                    _idx: int = idx,
+                    _select: ui.Select = select,
             ) -> Any:
                 return self._on_select_multi(interaction, _idx, _select)
 
@@ -333,12 +333,12 @@ class QuestionView(ui.View):
         self.add_item(self.submit_btn)
 
     async def _on_select_multi(
-        self, interaction: discord.Interaction, idx: int, select: ui.Select
+            self, interaction: discord.Interaction, idx: int, select: ui.Select
     ) -> None:
         await self._submit_multi_value(interaction, idx, select.values)
 
     async def _on_custom_multi(
-        self, interaction: discord.Interaction, idx: int
+            self, interaction: discord.Interaction, idx: int
     ) -> None:
         info = self._questions[idx] if idx < len(self._questions) else {}
         header = info.get("header", f"Q{idx + 1}")
@@ -350,7 +350,7 @@ class QuestionView(ui.View):
         await interaction.response.send_modal(CustomAnswerModal(header, _on_modal))
 
     async def _submit_multi_value(
-        self, interaction: discord.Interaction, idx: int, values: list[str]
+            self, interaction: discord.Interaction, idx: int, values: list[str]
     ) -> None:
         if not values:
             return
@@ -404,9 +404,9 @@ class PermissionView(ui.View):
     """
 
     def __init__(
-        self,
-        request: dict,
-        on_reply: Callable[[str], Awaitable[None]],
+            self,
+            request: dict,
+            on_reply: Callable[[str], Awaitable[None]],
     ) -> None:
         super().__init__(timeout=None)
         self._request_id = request.get("id", "")
@@ -443,9 +443,9 @@ def _disable_view(view: ui.View) -> None:
 
 
 async def _send_question(
-    channel: discord.abc.Messageable,
-    client: OpencodeClient,
-    request: dict,
+        channel: discord.abc.Messageable,
+        client: OpencodeClient,
+        request: dict,
 ) -> None:
     """Render one question request and wire its callbacks to the REST client."""
     rid = request.get("id", "")
@@ -510,9 +510,9 @@ async def _send_question(
 
 
 async def _send_permission(
-    channel: discord.abc.Messageable,
-    client: OpencodeClient,
-    request: dict,
+        channel: discord.abc.Messageable,
+        client: OpencodeClient,
+        request: dict,
 ) -> None:
     """Render one permission request and wire its callback to the REST client."""
     rid = request.get("id", "")
@@ -544,13 +544,13 @@ async def _send_permission(
 
 
 async def poll_pending_requests(
-    client: OpencodeClient,
-    session_id: str,
-    channel: discord.abc.Messageable,
-    *,
-    interval: float = _POLL_INTERVAL,
-    stop_event: asyncio.Event,
-    voice_session: VoiceSession | None = None,
+        client: OpencodeClient,
+        session_id: str,
+        channel: discord.abc.Messageable,
+        *,
+        interval: float = _POLL_INTERVAL,
+        stop_event: asyncio.Event,
+        voice_session: VoiceSession | None = None,
 ) -> None:
     """Poll ``GET /question`` + ``GET /permission`` and surface matching requests.
 
@@ -668,10 +668,10 @@ async def poll_pending_requests(
 
 
 async def _voice_answer_question(
-    voice_session: VoiceSession,
-    client: OpencodeClient,
-    request: dict,
-    channel: discord.abc.Messageable,
+        voice_session: VoiceSession,
+        client: OpencodeClient,
+        request: dict,
+        channel: discord.abc.Messageable,
 ) -> bool:
     """Speak a question via TTS, capture the spoken answer, post it back.
 

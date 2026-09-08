@@ -53,14 +53,14 @@ async def test_chain_edit_revert_aborts_reverts_resends(bot_instance, edit_confi
     bot_instance.client.script("revert_session", {"id": sid})
     bot_instance.client.script("send_prompt_async", None)
     bot_instance.client.script("get_session_status",
-                                {sid: {"type": "busy"}},
-                                {sid: {"type": "idle"}})
+                               {sid: {"type": "busy"}},
+                               {sid: {"type": "idle"}})
     bot_instance.client.script("list_questions", [], [])
     bot_instance.client.script("list_permissions", [], [])
     user_msg = {"info": {"role": "user", "id": "u-2"}, "parts": [{"type": "text", "text": "x"}]}
     bot_instance.client.script("list_messages",
-                                [user_msg],
-                                [assistant_message("EDITED RESULT", mid="m-2")])
+                               [user_msg],
+                               [assistant_message("EDITED RESULT", mid="m-2")])
 
     try:
         await bot_instance.on_message_edit(before, after)

@@ -49,6 +49,7 @@ async def test_chain_question_button_path_asked_and_answered():
     def _stop_after_first(queue):
         if queue is not None and len(queue) == 2:
             asyncio.get_event_loop().call_later(0.01, stop_event.set)
+
     client.on_call("list_questions", _stop_after_first)
 
     await questions_mod.poll_pending_requests(
@@ -86,6 +87,7 @@ async def test_chain_permission_button_path_asked_and_approved():
     def _stop_after_first(queue):
         if queue is not None and len(queue) == 2:
             asyncio.get_event_loop().call_later(0.01, stop_event.set)
+
     client.on_call("list_permissions", _stop_after_first)
 
     await questions_mod.poll_pending_requests(
@@ -126,6 +128,7 @@ async def test_chain_question_rest_path_asked_and_answered():
     def _stop_after_first(queue):
         if queue is not None and len(queue) == 2:
             asyncio.get_event_loop().call_later(0.1, stop_event.set)
+
     client.on_call("list_questions", _stop_after_first)
 
     await bq.poll_pending_requests_rest(
@@ -158,6 +161,7 @@ async def test_chain_permission_rest_path_asked_and_approved():
     def _stop_after_first(queue):
         if queue is not None and len(queue) == 2:
             asyncio.get_event_loop().call_later(0.1, stop_event.set)
+
     client.on_call("list_permissions", _stop_after_first)
 
     await bq.poll_pending_requests_rest(

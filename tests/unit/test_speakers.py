@@ -59,8 +59,8 @@ def test_match_speaker_picks_best_among_multiple():
     import numpy as np
     target = np.array([1.0, 0.0])
     speakers = {
-        "Jake": [np.array([0.9, 0.1])],   # close
-        "Bob": [np.array([0.0, 1.0])],    # orthogonal
+        "Jake": [np.array([0.9, 0.1])],  # close
+        "Bob": [np.array([0.0, 1.0])],  # orthogonal
     }
     assert speakers_mod._match_speaker(target, speakers, threshold=0.5) == "Jake"
 
@@ -149,6 +149,7 @@ async def test_transcribe_with_speakers_pyannote_missing_falls_back(monkeypatch,
 
     def boom(*a, **kw):
         raise RuntimeError("pyannote not installed")
+
     monkeypatch.setattr(speakers_mod, "load_speakers", boom)
 
     async def fake_transcribe(wav_bytes):
@@ -180,7 +181,7 @@ async def test_load_speakers_real_returns_jake(require_pyannote, speakers_dir, m
 
 
 async def test_identify_speakers_real_returns_labeled_transcript(
-    require_pyannote, speakers_dir, sample_wav_bytes, monkeypatch
+        require_pyannote, speakers_dir, sample_wav_bytes, monkeypatch
 ):
     """Real pyannote diarization + Whisper on the sample clip → labeled lines.
 
@@ -217,7 +218,7 @@ async def test_identify_speakers_real_returns_labeled_transcript(
 
 
 async def test_transcribe_with_speakers_real_orchestrates(
-    require_pyannote, speakers_dir, sample_wav_bytes, monkeypatch
+        require_pyannote, speakers_dir, sample_wav_bytes, monkeypatch
 ):
     """Real end-to-end orchestrator: speaker_id_enabled + Jake loaded."""
     monkeypatch.setattr(config, "speakers_dir", str(speakers_dir))

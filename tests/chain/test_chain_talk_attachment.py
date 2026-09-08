@@ -42,15 +42,15 @@ async def _script_bot_for_talk(bot_instance, sid="sid-talk"):
     bot_instance.client.script("create_session", {"id": sid})
     bot_instance.client.script("send_prompt_async", None)
     bot_instance.client.script("get_session_status",
-                                {sid: {"type": "busy"}},
-                                {sid: {"type": "idle"}})
+                               {sid: {"type": "busy"}},
+                               {sid: {"type": "idle"}})
     bot_instance.client.script("list_questions", [], [])
     bot_instance.client.script("list_permissions", [], [])
     bot_instance.client.script("list_messages", [assistant_message("TALK RESPONSE", mid="m-1")])
 
 
 async def test_chain_talk_attachment_drives_session(
-    bot_instance, talk_config, sample_mp3_bytes, monkeypatch
+        bot_instance, talk_config, sample_mp3_bytes, monkeypatch
 ):
     """Full /oc_talk chain: real STT on the sample clip, opencode drive, final posted."""
     guild = FakeGuild()
@@ -74,11 +74,11 @@ async def test_chain_talk_attachment_drives_session(
     # The final response was posted to the created channel.
     ch = guild.created_channels[0]
     final_posts = [c for c, _ in ch.sent if c and "TALK RESPONSE" in c]
-    assert final_posts, f"final not posted; sent: {[c for c,_ in ch.sent]}"
+    assert final_posts, f"final not posted; sent: {[c for c, _ in ch.sent]}"
 
 
 async def test_chain_talk_attachment_with_plan_type_directive(
-    bot_instance, talk_config, sample_mp3_bytes, monkeypatch
+        bot_instance, talk_config, sample_mp3_bytes, monkeypatch
 ):
     """/oc_talk with plan_type="note" prepends the directive to the prompt."""
     guild = FakeGuild()
@@ -99,7 +99,7 @@ async def test_chain_talk_attachment_with_plan_type_directive(
 
 
 async def test_chain_talk_attachment_speaker_id_variant(
-    bot_instance, talk_config, sample_mp3_bytes, speakers_dir, require_pyannote, monkeypatch
+        bot_instance, talk_config, sample_mp3_bytes, speakers_dir, require_pyannote, monkeypatch
 ):
     """/oc_talk with speaker_id_enabled=True runs real pyannote diarization.
 

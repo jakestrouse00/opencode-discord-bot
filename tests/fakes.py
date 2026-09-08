@@ -141,8 +141,8 @@ class ScriptedOpencodeClient(_ScriptedClient):
         if method == "list_agents":
             return []
         if method in (
-            "delete_session", "abort_session", "reply_question",
-            "reject_question", "reply_permission", "send_message",
+                "delete_session", "abort_session", "reply_question",
+                "reject_question", "reply_permission", "send_message",
         ):
             return True
         if method == "send_prompt_async":

@@ -176,6 +176,7 @@ async def test_probe_newest_returns_total_and_id():
         return httpx.Response(200, json={
             "data": {"data": [{"noteId": "abc"}], "total": 1}, "success": True
         })
+
     transport = httpx.MockTransport(handler)
     c = ComulyticClient("https://api.test", jwt="jwt", user_agent="ua")
     c._client = httpx.AsyncClient(transport=transport, base_url="https://api.test")
@@ -190,6 +191,7 @@ async def test_probe_newest_returns_total_and_id():
 async def test_probe_newest_empty_returns_zero_none():
     def handler(request):
         return httpx.Response(200, json={"data": {"data": [], "total": 0}, "success": True})
+
     transport = httpx.MockTransport(handler)
     c = ComulyticClient("https://api.test", jwt="jwt", user_agent="ua")
     c._client = httpx.AsyncClient(transport=transport, base_url="https://api.test")
@@ -206,6 +208,7 @@ async def test_get_note_detail_returns_data_block():
         return httpx.Response(200, json={
             "data": {"audioUrl": "https://x", "hasCloudAudio": True}, "success": True
         })
+
     transport = httpx.MockTransport(handler)
     c = ComulyticClient("https://api.test", jwt="jwt", user_agent="ua")
     c._client = httpx.AsyncClient(transport=transport, base_url="https://api.test")
@@ -219,6 +222,7 @@ async def test_get_note_detail_returns_data_block():
 async def test_download_audio_proxy_streams_bytes():
     def handler(request):
         return httpx.Response(206, content=b"audio-bytes-12345")
+
     transport = httpx.MockTransport(handler)
     c = ComulyticClient("https://api.test", jwt="jwt", user_agent="ua", web_base="https://web.test")
     c._client = httpx.AsyncClient(transport=transport, base_url="https://web.test")
@@ -232,6 +236,7 @@ async def test_download_audio_proxy_streams_bytes():
 async def test_download_audio_presigned_403_raises_expired():
     def handler(request):
         return httpx.Response(403, text="expired")
+
     transport = httpx.MockTransport(handler)
     c = ComulyticClient("https://api.test", jwt="jwt", user_agent="ua", web_base="https://web.test")
     c._s3_client = httpx.AsyncClient(transport=transport)
@@ -245,6 +250,7 @@ async def test_download_audio_presigned_403_raises_expired():
 async def test_download_audio_proxy_4xx_raises_comulytic_error():
     def handler(request):
         return httpx.Response(404, text="not found")
+
     transport = httpx.MockTransport(handler)
     c = ComulyticClient("https://api.test", jwt="jwt", user_agent="ua", web_base="https://web.test")
     c._client = httpx.AsyncClient(transport=transport, base_url="https://web.test")
@@ -294,6 +300,7 @@ async def test_download_audio_proxy_follows_cross_host_redirect_with_auth():
 async def test_download_audio_proxy_redirect_without_location_raises():
     def handler(request):
         return httpx.Response(301)  # no Location header
+
     transport = httpx.MockTransport(handler)
     c = ComulyticClient("https://api.test", jwt="jwt", user_agent="ua", web_base="https://web.test")
     c._client = httpx.AsyncClient(transport=transport, base_url="https://web.test")
@@ -339,6 +346,7 @@ async def test_non_json_response_raises_comulytic_error():
     def handler(request):
         return httpx.Response(200, text="<html>WAF interstitial</html>",
                               headers={"content-type": "text/html"})
+
     transport = httpx.MockTransport(handler)
     c = ComulyticClient("https://api.test", jwt="jwt", user_agent="ua")
     c._client = httpx.AsyncClient(transport=transport, base_url="https://api.test")
@@ -352,6 +360,7 @@ async def test_non_json_response_raises_comulytic_error():
 async def test_success_false_raises_comulytic_error():
     def handler(request):
         return httpx.Response(200, json={"success": False, "msg": "rate limited"})
+
     transport = httpx.MockTransport(handler)
     c = ComulyticClient("https://api.test", jwt="jwt", user_agent="ua")
     c._client = httpx.AsyncClient(transport=transport, base_url="https://api.test")

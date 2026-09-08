@@ -57,6 +57,7 @@ async def test_create_session(monkeypatch):
         assert request.url.path == "/session"
         assert request.method == "POST"
         return httpx.Response(200, json={"id": "sid-1"})
+
     transport = httpx.MockTransport(handler)
     c = _client_with(transport, monkeypatch)
     try:
@@ -70,6 +71,7 @@ async def test_send_prompt_async_returns_none_on_204(monkeypatch):
     def handler(request):
         assert request.url.path == "/session/sid-1/prompt_async"
         return httpx.Response(204)
+
     transport = httpx.MockTransport(handler)
     c = _client_with(transport, monkeypatch)
     try:
@@ -119,6 +121,7 @@ async def test_send_prompt_async_without_model_override_omits_model(monkeypatch)
 async def test_list_questions(monkeypatch):
     def handler(request):
         return httpx.Response(200, json=[{"id": "q1", "sessionID": "sid-1"}])
+
     transport = httpx.MockTransport(handler)
     c = _client_with(transport, monkeypatch)
     try:
@@ -131,6 +134,7 @@ async def test_list_questions(monkeypatch):
 async def test_reply_question_returns_bool(monkeypatch):
     def handler(request):
         return httpx.Response(200, json=True)
+
     transport = httpx.MockTransport(handler)
     c = _client_with(transport, monkeypatch)
     try:
@@ -143,6 +147,7 @@ async def test_reply_question_returns_bool(monkeypatch):
 async def test_abort_session_returns_bool(monkeypatch):
     def handler(request):
         return httpx.Response(200, json=True)
+
     transport = httpx.MockTransport(handler)
     c = _client_with(transport, monkeypatch)
     try:
@@ -158,6 +163,7 @@ async def test_revert_session(monkeypatch):
         body = json.loads(request.read().decode())
         assert body == {"messageID": "m-1"}
         return httpx.Response(200, json={"id": "sid-1"})
+
     transport = httpx.MockTransport(handler)
     c = _client_with(transport, monkeypatch)
     try:
@@ -170,6 +176,7 @@ async def test_revert_session(monkeypatch):
 async def test_get_session_status(monkeypatch):
     def handler(request):
         return httpx.Response(200, json={"sid-1": {"type": "busy"}})
+
     transport = httpx.MockTransport(handler)
     c = _client_with(transport, monkeypatch)
     try:
@@ -182,6 +189,7 @@ async def test_get_session_status(monkeypatch):
 async def test_list_messages(monkeypatch):
     def handler(request):
         return httpx.Response(200, json=[{"info": {"role": "assistant"}, "parts": []}])
+
     transport = httpx.MockTransport(handler)
     c = _client_with(transport, monkeypatch)
     try:
@@ -194,6 +202,7 @@ async def test_list_messages(monkeypatch):
 async def test_4xx_raises_opencodeerror(monkeypatch):
     def handler(request):
         return httpx.Response(400, text="bad request")
+
     transport = httpx.MockTransport(handler)
     c = _client_with(transport, monkeypatch)
     try:

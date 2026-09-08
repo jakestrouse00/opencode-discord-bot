@@ -35,7 +35,7 @@ def trigger_config(monkeypatch):
 
 
 async def test_chain_voice_message_trigger_drives_new_session(
-    bot_instance, trigger_config, sample_mp3_bytes, monkeypatch
+        bot_instance, trigger_config, sample_mp3_bytes, monkeypatch
 ):
     """Voice message in the trigger channel -> new oc-assistant session + final."""
     trigger_id = 8888
@@ -56,8 +56,8 @@ async def test_chain_voice_message_trigger_drives_new_session(
     bot_instance.client.script("create_session", {"id": sid})
     bot_instance.client.script("send_prompt_async", None)
     bot_instance.client.script("get_session_status",
-                                {sid: {"type": "busy"}},
-                                {sid: {"type": "idle"}})
+                               {sid: {"type": "busy"}},
+                               {sid: {"type": "idle"}})
     bot_instance.client.script("list_questions", [], [])
     bot_instance.client.script("list_permissions", [], [])
     bot_instance.client.script("list_messages", [assistant_message("VM PLAN", mid="m-1")])
@@ -79,11 +79,11 @@ async def test_chain_voice_message_trigger_drives_new_session(
     # The new channel got the final response.
     new_ch = guild.created_channels[0]
     final_posts = [c for c, _ in new_ch.sent if c and "VM PLAN" in c]
-    assert final_posts, f"final not posted; sent: {[c for c,_ in new_ch.sent]}"
+    assert final_posts, f"final not posted; sent: {[c for c, _ in new_ch.sent]}"
 
 
 async def test_chain_voice_message_in_session_channel_followup(
-    bot_instance, trigger_config, sample_mp3_bytes, monkeypatch
+        bot_instance, trigger_config, sample_mp3_bytes, monkeypatch
 ):
     """Voice message in an already-bound session channel -> voice follow-up."""
     import asyncio
@@ -104,16 +104,16 @@ async def test_chain_voice_message_in_session_channel_followup(
     # Script opencode for the follow-up drive.
     bot_instance.client.script("send_prompt_async", None)
     bot_instance.client.script("get_session_status",
-                                {sid: {"type": "busy"}},
-                                {sid: {"type": "idle"}})
+                               {sid: {"type": "busy"}},
+                               {sid: {"type": "idle"}})
     bot_instance.client.script("list_questions", [], [])
     bot_instance.client.script("list_permissions", [], [])
     # _fetch_last_user_message_id polls list_messages; the drive's list_messages
     # returns the final assistant. Script enough entries.
     user_msg = {"info": {"role": "user", "id": "u-1"}, "parts": [{"type": "text", "text": "x"}]}
     bot_instance.client.script("list_messages",
-                                [user_msg],
-                                [assistant_message("FOLLOWUP REPLY", mid="m-1")])
+                               [user_msg],
+                               [assistant_message("FOLLOWUP REPLY", mid="m-1")])
 
     await bot_instance.on_message(msg)
 

@@ -108,10 +108,10 @@ def _directory_label(directory: str | None) -> str | None:
 
 
 def question_embed(
-    session_title: str,
-    sid: str,
-    request: dict,
-    directory_label: str | None = None,
+        session_title: str,
+        sid: str,
+        request: dict,
+        directory_label: str | None = None,
 ) -> discord.Embed:
     """Build the orange 'question pending' embed for one question request."""
     blocks = [question_block(q) for q in (request.get("questions") or [])]
@@ -131,10 +131,10 @@ def question_embed(
 
 
 def permission_embed(
-    session_title: str,
-    sid: str,
-    request: dict,
-    directory_label: str | None = None,
+        session_title: str,
+        sid: str,
+        request: dict,
+        directory_label: str | None = None,
 ) -> discord.Embed:
     """Build the red 'permission pending' embed for one permission request."""
     embed = discord.Embed(
@@ -150,10 +150,10 @@ def permission_embed(
 
 
 def completion_embed(
-    session_title: str,
-    sid: str,
-    snippet: str,
-    directory_label: str | None = None,
+        session_title: str,
+        sid: str,
+        snippet: str,
+        directory_label: str | None = None,
 ) -> discord.Embed:
     """Build the green 'session completed' embed with a response snippet."""
     description = _snippet(snippet) if snippet else "_(no text output)_"
@@ -170,7 +170,7 @@ def completion_embed(
 
 
 async def _fetch_title(
-    client: OpencodeClient, sid: str, directory: str | None = None
+        client: OpencodeClient, sid: str, directory: str | None = None
 ) -> str:
     """Best-effort session title for embed headers (never raises).
 
@@ -190,7 +190,7 @@ async def _fetch_title(
 
 
 async def _fetch_snippet(
-    client: OpencodeClient, sid: str, directory: str | None = None
+        client: OpencodeClient, sid: str, directory: str | None = None
 ) -> str:
     """Best-effort final assistant text for a completed session.
 
@@ -207,7 +207,7 @@ async def _fetch_snippet(
 
 
 async def _discover_directories(
-    client: OpencodeClient, state: _MonitorState
+        client: OpencodeClient, state: _MonitorState
 ) -> list[str | None]:
     """Directories to poll this cycle: `[None]` (the serve cwd instance)
     plus each known project worktree from `GET /project`.

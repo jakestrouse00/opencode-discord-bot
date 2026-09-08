@@ -201,7 +201,7 @@ def _get_speaker_embedding():
 
 
 def load_speakers(
-    speakers_dir: Path | str | None = None,
+        speakers_dir: Path | str | None = None,
 ) -> dict[str, list]:
     """Load reference speaker embeddings from ``Speakers/<name>/`` subfolders.
 
@@ -309,9 +309,9 @@ def _cosine_similarity(a, b) -> float:
 
 
 def _match_speaker(
-    embedding,
-    speakers: dict[str, list],
-    threshold: float,
+        embedding,
+        speakers: dict[str, list],
+        threshold: float,
 ) -> str | None:
     """Match an embedding against reference speakers via cosine similarity.
 

@@ -69,12 +69,12 @@ _BACKOFF_CAP_MULTIPLIER = 3.0
 
 
 async def poll_until_idle(
-    client: OpencodeClient,
-    session_id: str,
-    on_status: OnStatus,
-    *,
-    interval: float = 2.0,
-    timeout: float | None = None,
+        client: OpencodeClient,
+        session_id: str,
+        on_status: OnStatus,
+        *,
+        interval: float = 2.0,
+        timeout: float | None = None,
 ) -> SessionStatus:
     """Poll ``GET /session/status`` for ``session_id`` until it is idle.
 
@@ -134,7 +134,7 @@ async def poll_until_idle(
         try:
             status_map = await client.get_session_status()
         except (
-            Exception
+                Exception
         ) as exc:  # noqa: BLE001 — transient HTTP errors shouldn't kill the poll
             _log.warning("session status fetch failed: %r — retrying", exc)
             status_map = {}
@@ -152,7 +152,7 @@ async def poll_until_idle(
             try:
                 await on_status(status)
             except (
-                Exception
+                    Exception
             ):  # noqa: BLE001 — a progress-render error must not kill the poll
                 _log.warning("on_status callback raised", exc_info=True)
         else:

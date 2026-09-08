@@ -46,7 +46,7 @@ def test_fmt_options_with_description():
 
 def test_question_block_includes_header():
     block = questions_mod._question_block({"header": "Pick one", "question": "which?",
-                                            "options": [{"label": "a"}]})
+                                           "options": [{"label": "a"}]})
     assert "Pick one" in block
     assert "which?" in block
 
@@ -102,6 +102,7 @@ async def test_one_question_surfaces_view():
     def _stop_after_first_poll(queue):
         if queue is not None and len(queue) == 2:  # the first (with question) was popped
             asyncio.get_event_loop().call_later(0.01, stop_event.set)
+
     client.on_call("list_questions", _stop_after_first_poll)
 
     await questions_mod.poll_pending_requests(
@@ -128,6 +129,7 @@ async def test_question_button_click_calls_reply_question():
     def _stop_after_first(queue):
         if queue is not None and len(queue) == 2:
             asyncio.get_event_loop().call_later(0.01, stop_event.set)
+
     client.on_call("list_questions", _stop_after_first)
 
     await questions_mod.poll_pending_requests(
@@ -160,6 +162,7 @@ async def test_permission_button_click_calls_reply_permission():
     def _stop_after_first(queue):
         if queue is not None and len(queue) == 2:
             asyncio.get_event_loop().call_later(0.01, stop_event.set)
+
     client.on_call("list_permissions", _stop_after_first)
 
     await questions_mod.poll_pending_requests(
@@ -188,6 +191,7 @@ async def test_unanswered_question_rejected_on_exit():
     def _stop_after_first(queue):
         if queue is not None and len(queue) == 1:  # 1 remaining after pop
             asyncio.get_event_loop().call_later(0.01, stop_event.set)
+
     client.on_call("list_questions", _stop_after_first)
 
     await questions_mod.poll_pending_requests(

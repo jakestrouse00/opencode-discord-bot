@@ -85,14 +85,14 @@ class DiscordRest:
     # --- internal request helper -------------------------------------------
 
     async def _request(
-        self,
-        method: str,
-        path: str,
-        *,
-        json: dict | None = None,
-        params: dict | None = None,
-        reason: str = "",
-        _retry: int = 0,
+            self,
+            method: str,
+            path: str,
+            *,
+            json: dict | None = None,
+            params: dict | None = None,
+            reason: str = "",
+            _retry: int = 0,
     ) -> dict:
         url = f"{self._base}{path}"
         headers: dict[str, str] = {}
@@ -127,13 +127,13 @@ class DiscordRest:
     # --- channel operations ------------------------------------------------
 
     async def create_text_channel(
-        self,
-        guild_id: int,
-        name: str,
-        *,
-        parent_id: int = 0,
-        topic: str = "",
-        reason: str = "",
+            self,
+            guild_id: int,
+            name: str,
+            *,
+            parent_id: int = 0,
+            topic: str = "",
+            reason: str = "",
     ) -> dict:
         """Create a text channel under an optional category.
 
@@ -151,11 +151,11 @@ class DiscordRest:
         )
 
     async def edit_channel(
-        self,
-        channel_id: int,
-        name: str,
-        *,
-        reason: str = "",
+            self,
+            channel_id: int,
+            name: str,
+            *,
+            reason: str = "",
     ) -> dict:
         """Rename a channel (PATCH /channels/{id}).
 
@@ -179,7 +179,7 @@ class DiscordRest:
         )
 
     async def edit_message(
-        self, channel_id: int, message_id: int, content: str
+            self, channel_id: int, message_id: int, content: str
     ) -> dict:
         """Edit a message (PATCH /channels/{id}/messages/{msg_id}).
 
@@ -193,11 +193,11 @@ class DiscordRest:
         )
 
     async def list_messages(
-        self,
-        channel_id: int,
-        *,
-        after: int = 0,
-        limit: int = 50,
+            self,
+            channel_id: int,
+            *,
+            after: int = 0,
+            limit: int = 50,
     ) -> list[dict]:
         """List messages after a snowflake id (GET /channels/{id}/messages).
 

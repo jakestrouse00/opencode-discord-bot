@@ -207,11 +207,11 @@ async def _post(rest: "DiscordRest", channel_id: int, content: str) -> int | Non
 
 
 async def _await_reply(
-    rest: "DiscordRest",
-    channel_id: int,
-    after_msg_id: int,
-    bot_user_id: int | None,
-    timeout: float,
+        rest: "DiscordRest",
+        channel_id: int,
+        after_msg_id: int,
+        bot_user_id: int | None,
+        timeout: float,
 ) -> str | None:
     """Poll GET /channels/{id}/messages for the first non-bot message after
     ``after_msg_id``. Returns its content, or None on timeout.
@@ -264,13 +264,13 @@ async def _await_reply(
 
 
 async def _handle_question(
-    client: OpencodeClient,
-    rest: "DiscordRest",
-    channel_id: int,
-    request: dict,
-    *,
-    bot_user_id: int | None,
-    question_timeout: float,
+        client: OpencodeClient,
+        rest: "DiscordRest",
+        channel_id: int,
+        request: dict,
+        *,
+        bot_user_id: int | None,
+        question_timeout: float,
 ) -> bool:
     """Surface one question request and wait for the user's plain-text reply.
 
@@ -298,9 +298,9 @@ async def _handle_question(
     n = len(questions)
     for idx, q in enumerate(questions):
         single_content = (
-            f"**Question {idx + 1} of {n}** `{rid[:12]}`\n"
-            + _question_block(q)
-            + f"\n\n_Reply in this channel. You have {int(question_timeout)}s._"
+                f"**Question {idx + 1} of {n}** `{rid[:12]}`\n"
+                + _question_block(q)
+                + f"\n\n_Reply in this channel. You have {int(question_timeout)}s._"
         )
         question_msg_id = await _post(rest, channel_id, single_content)
         if question_msg_id is None:
@@ -406,11 +406,11 @@ async def _handle_question(
 
 
 async def _find_reply_msg_id(
-    rest: "DiscordRest",
-    channel_id: int,
-    after_msg_id: int,
-    bot_user_id: int | None,
-    reply_content: str,
+        rest: "DiscordRest",
+        channel_id: int,
+        after_msg_id: int,
+        bot_user_id: int | None,
+        reply_content: str,
 ) -> int:
     """Find the message id of the first non-bot message with content matching
     ``reply_content`` (case-insensitive, stripped) after ``after_msg_id``.
@@ -446,13 +446,13 @@ async def _find_reply_msg_id(
 
 
 async def _handle_permission(
-    client: OpencodeClient,
-    rest: "DiscordRest",
-    channel_id: int,
-    request: dict,
-    *,
-    bot_user_id: int | None,
-    question_timeout: float,
+        client: OpencodeClient,
+        rest: "DiscordRest",
+        channel_id: int,
+        request: dict,
+        *,
+        bot_user_id: int | None,
+        question_timeout: float,
 ) -> bool:
     """Surface one permission request and wait for the user's y/n reply."""
     rid = request.get("id", "")
@@ -498,15 +498,15 @@ async def _handle_permission(
 
 
 async def poll_pending_requests_rest(
-    client: OpencodeClient,
-    session_id: str,
-    rest: "DiscordRest",
-    channel_id: int,
-    *,
-    stop_event: asyncio.Event,
-    interval: float = _DEFAULT_POLL_INTERVAL,
-    question_timeout: float = _DEFAULT_QUESTION_TIMEOUT,
-    bot_user_id: int | None = None,
+        client: OpencodeClient,
+        session_id: str,
+        rest: "DiscordRest",
+        channel_id: int,
+        *,
+        stop_event: asyncio.Event,
+        interval: float = _DEFAULT_POLL_INTERVAL,
+        question_timeout: float = _DEFAULT_QUESTION_TIMEOUT,
+        bot_user_id: int | None = None,
 ) -> None:
     """Poll GET /question + GET /permission and surface matching requests.
 

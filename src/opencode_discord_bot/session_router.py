@@ -76,10 +76,10 @@ class SessionRouter:
         return self._map.get(str(channel_id))
 
     async def get_or_create(
-        self,
-        channel_id: int,
-        client: "OpencodeClient",
-        title: str | None = None,
+            self,
+            channel_id: int,
+            client: "OpencodeClient",
+            title: str | None = None,
     ) -> str:
         """Return the bound session id, creating + persisting a new one if none.
 

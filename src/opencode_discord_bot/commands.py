@@ -242,8 +242,8 @@ class OpencodeBot(discord.Bot):
             guild_ids=_guild_ids,
         )
         async def oc(
-            ctx: discord.ApplicationContext,
-            prompt: str = discord.Option(str, "The prompt to send to opencode."),
+                ctx: discord.ApplicationContext,
+                prompt: str = discord.Option(str, "The prompt to send to opencode."),
         ) -> None:
             _log.info(
                 "/oc received (user=%s, channel=%s, guild=%s): %s",
@@ -260,17 +260,17 @@ class OpencodeBot(discord.Bot):
             guild_ids=_guild_ids,
         )
         async def oc_plan(
-            ctx: discord.ApplicationContext,
-            change: str = discord.Option(str, "The change to draft a plan for."),
-            plan_type: str | None = discord.Option(
-                str,
-                "Optional: pick 'Planned update' or 'Note to self'. Leave blank to let the agent classify.",
-                choices=[
-                    discord.OptionChoice("Planned update", "actionable"),
-                    discord.OptionChoice("Note to self", "note"),
-                ],
-                default=None,
-            ),
+                ctx: discord.ApplicationContext,
+                change: str = discord.Option(str, "The change to draft a plan for."),
+                plan_type: str | None = discord.Option(
+                    str,
+                    "Optional: pick 'Planned update' or 'Note to self'. Leave blank to let the agent classify.",
+                    choices=[
+                        discord.OptionChoice("Planned update", "actionable"),
+                        discord.OptionChoice("Note to self", "note"),
+                    ],
+                    default=None,
+                ),
         ) -> None:
             prompt = change
             if plan_type is not None:
@@ -383,7 +383,7 @@ class OpencodeBot(discord.Bot):
             ]
             text = "\n".join(lines) if lines else "(no sessions)"
             for chunk in _split_message(
-                f"**Recent opencode sessions ({len(recent)} of {len(sessions)}):**\n{text}"
+                    f"**Recent opencode sessions ({len(recent)} of {len(sessions)}):**\n{text}"
             ):
                 await ctx.followup.send(chunk)
 
@@ -419,22 +419,22 @@ class OpencodeBot(discord.Bot):
             guild_ids=_guild_ids,
         )
         async def oc_voice(
-            ctx: discord.ApplicationContext,
-            mode: str = discord.Option(
-                str,
-                "Pick 'Planned update' (actionable plan) or 'Note to self' (note).",
-                choices=[
-                    discord.OptionChoice("Planned update", "change"),
-                    discord.OptionChoice("Note to self", "note"),
-                ],
-                required=True,
-            ),
-            voice_channel: discord.VoiceChannel | None = discord.Option(
-                discord.VoiceChannel,
-                "Voice channel to join (defaults to your current channel).",
-                default=None,
-                required=False,
-            ),
+                ctx: discord.ApplicationContext,
+                mode: str = discord.Option(
+                    str,
+                    "Pick 'Planned update' (actionable plan) or 'Note to self' (note).",
+                    choices=[
+                        discord.OptionChoice("Planned update", "change"),
+                        discord.OptionChoice("Note to self", "note"),
+                    ],
+                    required=True,
+                ),
+                voice_channel: discord.VoiceChannel | None = discord.Option(
+                    discord.VoiceChannel,
+                    "Voice channel to join (defaults to your current channel).",
+                    default=None,
+                    required=False,
+                ),
         ) -> None:
             _log.info(
                 "/oc_voice received (user=%s, channel=%s, guild=%s, mode=%s)",
@@ -475,22 +475,22 @@ class OpencodeBot(discord.Bot):
             guild_ids=_guild_ids,
         )
         async def oc_talk(
-            ctx: discord.ApplicationContext,
-            recording: discord.Attachment = discord.Option(
-                discord.Attachment,
-                "Audio or video recording of your plan/note (mp3, wav, m4a, ogg, mov, mp4, …).",
-                required=True,
-            ),
-            plan_type: str | None = discord.Option(
-                str,
-                "Optional: pick 'Planned update' or 'Note to self'. Leave blank to let the agent classify.",
-                choices=[
-                    discord.OptionChoice("Planned update", "actionable"),
-                    discord.OptionChoice("Note to self", "note"),
-                ],
-                default=None,
-                required=False,
-            ),
+                ctx: discord.ApplicationContext,
+                recording: discord.Attachment = discord.Option(
+                    discord.Attachment,
+                    "Audio or video recording of your plan/note (mp3, wav, m4a, ogg, mov, mp4, …).",
+                    required=True,
+                ),
+                plan_type: str | None = discord.Option(
+                    str,
+                    "Optional: pick 'Planned update' or 'Note to self'. Leave blank to let the agent classify.",
+                    choices=[
+                        discord.OptionChoice("Planned update", "actionable"),
+                        discord.OptionChoice("Note to self", "note"),
+                    ],
+                    default=None,
+                    required=False,
+                ),
         ) -> None:
             _log.info(
                 "/oc_talk received (user=%s, channel=%s, guild=%s, file=%s, "
@@ -595,7 +595,7 @@ class OpencodeBot(discord.Bot):
                     if self.bridge_router is not None and self.bridge_router.current(ch.id) is not None:
                         await self.bridge_router.reset(ch.id)
                 except (
-                    Exception
+                        Exception
                 ):  # noqa: BLE001 — router cleanup must not lose the summary
                     _log.warning(
                         "router reset for channel %s raised during /oc_cleanup",
@@ -752,9 +752,9 @@ class OpencodeBot(discord.Bot):
         # down. The `self._bridge_task is None` guard prevents a reconnect
         # re-spawn (mirrors `_serve_started`).
         if (
-            config.comulytic_enabled
-            and config.comulytic_jwt
-            and self._bridge_task is None
+                config.comulytic_enabled
+                and config.comulytic_jwt
+                and self._bridge_task is None
         ):
             from opencode_discord_bot.bridge import run_bridge
 
@@ -778,9 +778,9 @@ class OpencodeBot(discord.Bot):
         # question/permission/message GETs) and posts embeds to the
         # configured Discord channel — see `monitor.py`.
         if (
-            config.monitor_enabled
-            and config.monitor_channel_id
-            and self._monitor_task is None
+                config.monitor_enabled
+                and config.monitor_channel_id
+                and self._monitor_task is None
         ):
             from opencode_discord_bot.monitor import run_monitor
 
@@ -990,8 +990,8 @@ class OpencodeBot(discord.Bot):
         if config.discord_bot_allowed_channel_ids:
             return True
         if config.voice_message_trigger_channel_id not in (
-            0,
-            _STALE_DEFAULT_TRIGGER_CHANNEL_ID,
+                0,
+                _STALE_DEFAULT_TRIGGER_CHANNEL_ID,
         ):
             return True
         return False
@@ -1179,12 +1179,12 @@ class OpencodeBot(discord.Bot):
             "restricted to this channel + bot-created session channels)\n"
             + guild_id_line
             + "\nThese IDs were written to `.env` and reloaded into the "
-            "running bot. They persist across restarts.\n\n"
-            "**Next step:** run\n"
-            f"```\npython -m opencode_discord_bot.sync_commands --guild {guild.id}\n```\n"
-            "to push the slash-command surface (including `/oc_setup`) to "
-            "this guild. Slash commands are not auto-synced on startup "
-            "(`auto_sync_commands=False`).",
+              "running bot. They persist across restarts.\n\n"
+              "**Next step:** run\n"
+              f"```\npython -m opencode_discord_bot.sync_commands --guild {guild.id}\n```\n"
+              "to push the slash-command surface (including `/oc_setup`) to "
+              "this guild. Slash commands are not auto-synced on startup "
+              "(`auto_sync_commands=False`).",
             ephemeral=True,
         )
 
@@ -1211,10 +1211,10 @@ class OpencodeBot(discord.Bot):
         return None
 
     async def _rename_when_slug_ready(
-        self,
-        channel: discord.TextChannel,
-        prompt: str,
-        fallback: str,
+            self,
+            channel: discord.TextChannel,
+            prompt: str,
+            fallback: str,
     ) -> None:
         """Generate an LLM slug from `prompt` and rename `channel` to it.
 
@@ -1236,7 +1236,7 @@ class OpencodeBot(discord.Bot):
         try:
             slug = await generate_slug(prompt, fallback=fallback)
         except (
-            Exception
+                Exception
         ) as e:  # noqa: BLE001 — generate_slug is supposed to never raise, but defend in depth
             _log.warning(
                 "generate_slug raised unexpectedly; keeping %r: %r", channel.name, e
@@ -1252,12 +1252,12 @@ class OpencodeBot(discord.Bot):
             )
 
     async def _drive_session(
-        self,
-        sid: str,
-        *,
-        send_chunk: Callable[[str], Awaitable[Any]],
-        progress_msg: discord.Message,
-        voice_session: VoiceSession | None = None,
+            self,
+            sid: str,
+            *,
+            send_chunk: Callable[[str], Awaitable[Any]],
+            progress_msg: discord.Message,
+            voice_session: VoiceSession | None = None,
     ) -> str | None:
         """Shared poll/progress/reply body for `/oc` and plain-text follow-ups.
 
@@ -1371,12 +1371,12 @@ class OpencodeBot(discord.Bot):
             _log.info("session %s drive finished", sid)
 
     async def _run_prompt(
-        self,
-        ctx: discord.ApplicationContext,
-        prompt: str,
-        *,
-        agent: str | None,
-        echo_prompt: str | None = None,
+            self,
+            ctx: discord.ApplicationContext,
+            prompt: str,
+            *,
+            agent: str | None,
+            echo_prompt: str | None = None,
     ) -> None:
         """Shared body for /oc and /oc_plan.
 
@@ -1624,10 +1624,10 @@ class OpencodeBot(discord.Bot):
             return
         # (c) Voice message in the configured trigger channel -> new session.
         if (
-            sid is None
-            and voice_att is not None
-            and config.voice_message_trigger_channel_id
-            and message.channel.id == config.voice_message_trigger_channel_id
+                sid is None
+                and voice_att is not None
+                and config.voice_message_trigger_channel_id
+                and message.channel.id == config.voice_message_trigger_channel_id
         ):
             _log.info(
                 "voice message in trigger channel #%s -> new oc-assistant session "
@@ -1642,7 +1642,7 @@ class OpencodeBot(discord.Bot):
         return
 
     async def _fetch_last_user_message_id(
-        self, sid: str, *, seen_before: str | None = None, attempts: int = 3
+            self, sid: str, *, seen_before: str | None = None, attempts: int = 3
     ) -> str | None:
         """Best-effort fetch of the latest opencode user message id in `sid`.
 
@@ -1731,10 +1731,10 @@ class OpencodeBot(discord.Bot):
         )
 
     async def _run_voice_followup(
-        self,
-        message: discord.Message,
-        sid: str,
-        attachment: discord.Attachment,
+            self,
+            message: discord.Message,
+            sid: str,
+            attachment: discord.Attachment,
     ) -> None:
         """Transcribe a voice-message attachment and send it as a follow-up prompt
         to an existing session (the voice-in analog of `_run_followup`).
@@ -1766,8 +1766,8 @@ class OpencodeBot(discord.Bot):
             _log.warning("voice-message follow-up transcription failed: %r", e)
             await status_msg.edit(
                 content=f"Failed to transcribe `{attachment.filename}`: {e}. "
-                f"The session is bound to this channel — type your plan as "
-                f"text and it will be forwarded to the same opencode session."
+                        f"The session is bound to this channel — type your plan as "
+                        f"text and it will be forwarded to the same opencode session."
             )
             return
 
@@ -1779,8 +1779,8 @@ class OpencodeBot(discord.Bot):
             )
             await status_msg.edit(
                 content="Transcription came back empty (no speech detected). "
-                "The session is bound to this channel — type your plan as "
-                "text to continue."
+                        "The session is bound to this channel — type your plan as "
+                        "text to continue."
             )
             return
 
@@ -1829,7 +1829,7 @@ class OpencodeBot(discord.Bot):
         )
 
     async def on_message_edit(
-        self, before: discord.Message, after: discord.Message
+            self, before: discord.Message, after: discord.Message
     ) -> None:
         """Abort, revert, and resend when a user edits their own follow-up.
 
@@ -1963,10 +1963,10 @@ class OpencodeBot(discord.Bot):
         )
 
     async def _start_voice_session(
-        self,
-        ctx: discord.ApplicationContext,
-        mode: str,
-        voice_channel: discord.VoiceChannel | None,
+            self,
+            ctx: discord.ApplicationContext,
+            mode: str,
+            voice_channel: discord.VoiceChannel | None,
     ) -> None:
         """Entry point for `/oc_voice` — join a voice channel and start listening.
 
@@ -2079,10 +2079,10 @@ class OpencodeBot(discord.Bot):
         )
 
     async def _finalize_voice_session(
-        self,
-        ctx: discord.ApplicationContext | None,
-        session: VoiceSession,
-        transcript: str,
+            self,
+            ctx: discord.ApplicationContext | None,
+            session: VoiceSession,
+            transcript: str,
     ) -> None:
         """Bridge the voice transcript to the existing text session pipeline.
 
@@ -2148,9 +2148,9 @@ class OpencodeBot(discord.Bot):
         # already fetched the message list and extracted the assistant text
         # for its own reply; reuse that here instead of re-fetching.
         if (
-            config.voice_tts_enabled
-            and final_text
-            and session.voice_client.is_connected()
+                config.voice_tts_enabled
+                and final_text
+                and session.voice_client.is_connected()
         ):
             try:
                 await session.speak(final_text)
@@ -2171,10 +2171,10 @@ class OpencodeBot(discord.Bot):
             _log.warning("voice disconnect during teardown failed", exc_info=True)
 
     async def _run_talk_session(
-        self,
-        ctx: discord.ApplicationContext,
-        recording: discord.Attachment,
-        plan_type: str | None,
+            self,
+            ctx: discord.ApplicationContext,
+            recording: discord.Attachment,
+            plan_type: str | None,
     ) -> None:
         """Entry point for `/oc_talk` — transcribe an uploaded audio or video file.
 
@@ -2275,8 +2275,8 @@ class OpencodeBot(discord.Bot):
             _log.warning("/oc_talk transcription failed: %r", e)
             await status_msg.edit(
                 content=f"Failed to transcribe `{recording.filename}`: {e}. "
-                f"The session is bound to this channel — type your plan as "
-                f"text and it will be forwarded to the same opencode session."
+                        f"The session is bound to this channel — type your plan as "
+                        f"text and it will be forwarded to the same opencode session."
             )
             return
 
@@ -2284,8 +2284,8 @@ class OpencodeBot(discord.Bot):
         if not transcript:
             await status_msg.edit(
                 content="Transcription came back empty (no speech detected). "
-                "The session is bound to this channel — type your plan as "
-                "text to continue."
+                        "The session is bound to this channel — type your plan as "
+                        "text to continue."
             )
             return
 
@@ -2335,9 +2335,9 @@ class OpencodeBot(discord.Bot):
         )
 
     async def _run_talk_from_message(
-        self,
-        message: discord.Message,
-        attachment: discord.Attachment,
+            self,
+            message: discord.Message,
+            attachment: discord.Attachment,
     ) -> None:
         """Transcribe a voice-message attachment posted in the trigger channel
         and start a new oc-assistant session (the voice-in analog of
@@ -2445,8 +2445,8 @@ class OpencodeBot(discord.Bot):
             _log.warning("voice-message transcription failed: %r", e)
             await status_msg.edit(
                 content=f"Failed to transcribe `{attachment.filename}`: {e}. "
-                f"The session is bound to this channel — type your plan as "
-                f"text and it will be forwarded to the same opencode session."
+                        f"The session is bound to this channel — type your plan as "
+                        f"text and it will be forwarded to the same opencode session."
             )
             return
 
@@ -2454,8 +2454,8 @@ class OpencodeBot(discord.Bot):
         if not transcript:
             await status_msg.edit(
                 content="Transcription came back empty (no speech detected). "
-                "The session is bound to this channel — type your plan as "
-                "text to continue."
+                        "The session is bound to this channel — type your plan as "
+                        "text to continue."
             )
             return
 

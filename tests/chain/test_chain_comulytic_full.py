@@ -78,7 +78,7 @@ def chain_config(monkeypatch, tmp_path):
 
 
 async def test_chain_comulytic_full_with_real_stt(
-    chain_config, sample_mp3_bytes, stub_slug, tmp_path, monkeypatch
+        chain_config, sample_mp3_bytes, stub_slug, tmp_path, monkeypatch
 ):
     """Chain A: Comulytic poll + pull + real STT + route to oc-assistant + Discord.
 
@@ -95,7 +95,8 @@ async def test_chain_comulytic_full_with_real_stt(
     comulytic.script("probe_newest", (1, "n-1"))
     # list_recordings: page 1 returns the new recording (audio-delivered).
     comulytic.script("list_recordings",
-                     {"data": {"data": [{"noteId": "n-1", "hasCloudAudio": True, "audioAccess": "public"}], "total": 1}})
+                     {"data": {"data": [{"noteId": "n-1", "hasCloudAudio": True, "audioAccess": "public"}],
+                               "total": 1}})
     # get_note_detail for the recording.
     comulytic.script("get_note_detail",
                      {"hasCloudAudio": True, "audioAccess": "public",
@@ -138,7 +139,7 @@ async def test_chain_comulytic_full_with_real_stt(
 
 
 async def test_chain_comulytic_full_with_speaker_id(
-    chain_config, sample_mp3_bytes, stub_slug, tmp_path, speakers_dir, require_pyannote, monkeypatch
+        chain_config, sample_mp3_bytes, stub_slug, tmp_path, speakers_dir, require_pyannote, monkeypatch
 ):
     """Chain A (speaker-ID variant): real pyannote diarization on the sample clip.
 
@@ -161,7 +162,8 @@ async def test_chain_comulytic_full_with_speaker_id(
     comulytic = ScriptedComulyticClient(default_audio_bytes=sample_mp3_bytes)
     comulytic.script("probe_newest", (1, "n-1"))
     comulytic.script("list_recordings",
-                     {"data": {"data": [{"noteId": "n-1", "hasCloudAudio": True, "audioAccess": "public"}], "total": 1}})
+                     {"data": {"data": [{"noteId": "n-1", "hasCloudAudio": True, "audioAccess": "public"}],
+                               "total": 1}})
     comulytic.script("get_note_detail",
                      {"hasCloudAudio": True, "audioAccess": "public",
                       "objStorageUrl": "https://s3.example/raw.mp3"})
@@ -195,7 +197,7 @@ async def test_chain_comulytic_full_with_speaker_id(
 
 
 async def test_chain_comulytic_log_only_no_discord(
-    chain_config, sample_mp3_bytes, stub_slug, tmp_path, monkeypatch
+        chain_config, sample_mp3_bytes, stub_slug, tmp_path, monkeypatch
 ):
     """Chain A (log-only variant): no Discord token → route logs the response."""
     from opencode_discord_bot import voice as voice_mod
@@ -207,7 +209,8 @@ async def test_chain_comulytic_log_only_no_discord(
     comulytic = ScriptedComulyticClient(default_audio_bytes=sample_mp3_bytes)
     comulytic.script("probe_newest", (1, "n-1"))
     comulytic.script("list_recordings",
-                     {"data": {"data": [{"noteId": "n-1", "hasCloudAudio": True, "audioAccess": "public"}], "total": 1}})
+                     {"data": {"data": [{"noteId": "n-1", "hasCloudAudio": True, "audioAccess": "public"}],
+                               "total": 1}})
     comulytic.script("get_note_detail",
                      {"hasCloudAudio": True, "audioAccess": "public",
                       "objStorageUrl": "https://s3.example/raw.mp3"})

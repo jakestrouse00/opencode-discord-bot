@@ -70,16 +70,16 @@ def test_stats_payload_shape(client, monkeypatch, tmp_path):
     assert "rss_kb" in body
     b = body["bridge"]
     for key in (
-        "skip_transcription",
-        "paused",
-        "processed",
-        "skipped",
-        "failed",
-        "last_poll_at",
-        "last_poll_status",
-        "in_flight_note_id",
-        "seen_count",
-        "recent",
+            "skip_transcription",
+            "paused",
+            "processed",
+            "skipped",
+            "failed",
+            "last_poll_at",
+            "last_poll_status",
+            "in_flight_note_id",
+            "seen_count",
+            "recent",
     ):
         assert key in b
     assert "config" in body

@@ -38,12 +38,14 @@ def mock_slug_client(monkeypatch):
 def _set_response(handler, status_code=200, json_body=None, headers=None):
     def _h(request: httpx.Request) -> httpx.Response:
         return httpx.Response(status_code, json=json_body or {}, headers=headers or {})
+
     handler.set(_h)
 
 
 def _set_exc(handler, exc):
     def _h(request: httpx.Request) -> httpx.Response:
         raise exc
+
     handler.set(_h)
 
 

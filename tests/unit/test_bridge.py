@@ -242,7 +242,7 @@ async def test_route_to_assistant_create_session_failure_returns_empty(monkeypat
 
 
 async def test_route_to_assistant_does_not_echo_prompt_when_no_assistant_text(
-    monkeypatch, tmp_path, stub_slug
+        monkeypatch, tmp_path, stub_slug
 ):
     """Regression: when list_messages returns ONLY a user message (the prompt
     with [DISCORD_BOT]/[COMULYTIC_BRIDGE] tags), the bridge must NOT post the
@@ -362,7 +362,7 @@ def _script_new_delivered(comulytic: ScriptedComulyticClient):
 
 
 async def test_poll_once_skip_transcription_marks_seen_no_processing(
-    tmp_seen_path, monkeypatch
+        tmp_seen_path, monkeypatch
 ):
     """Skip toggle ON: delivered recordings are marked seen (persisted) but
     NEVER processed (no create_session) and counted as skipped."""
@@ -396,7 +396,7 @@ async def test_poll_once_skip_transcription_marks_seen_no_processing(
 
 
 async def test_poll_once_skip_transcription_off_processes(
-    tmp_seen_path, monkeypatch
+        tmp_seen_path, monkeypatch
 ):
     """Toggle OFF: the same poll cycle processes the recording normally
     (existing behavior unchanged)."""
@@ -409,6 +409,7 @@ async def test_poll_once_skip_transcription_off_processes(
         comulytic = ScriptedComulyticClient()
         _script_new_delivered(comulytic)
         opencode = ScriptedOpencodeClient()
+
         # The full pipeline is NOT scripted here (real STT would run) —
         # stub process_new_recording to a cheap fake so the test stays unit.
         async def _fake_process(*args, **kwargs):
@@ -443,7 +444,7 @@ async def test_apply_pending_actions_mark_all_seen(tmp_seen_path, monkeypatch):
         comulytic.script(
             "list_recordings",
             {"data": {"data": [{"noteId": "n-1"}, {"noteId": "n-2"},
-                                {"noteId": "n-3"}], "total": 3}},
+                               {"noteId": "n-3"}], "total": 3}},
         )
         seen: set[str] = set()
         ds.request_action("mark_all_seen")

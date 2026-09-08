@@ -423,10 +423,10 @@ def is_transcribable_attachment(attachment) -> bool:
 
 
 async def extract_audio_to_wav(
-    media_bytes: bytes,
-    *,
-    content_type: str | None = None,
-    filename: str | None = None,
+        media_bytes: bytes,
+        *,
+        content_type: str | None = None,
+        filename: str | None = None,
 ) -> bytes:
     """Convert uploaded audio/video bytes to WAV bytes for the Whisper transcriber.
 
@@ -450,10 +450,10 @@ async def extract_audio_to_wav(
     ct = (content_type or "").lower()
     name = (filename or "").lower()
     is_wav = (
-        ct.startswith("audio/wav")
-        or ct.startswith("audio/wavx")
-        or ct.startswith("audio/x-wav")
-        or (name.endswith(".wav"))
+            ct.startswith("audio/wav")
+            or ct.startswith("audio/wavx")
+            or ct.startswith("audio/x-wav")
+            or (name.endswith(".wav"))
     )
     if is_wav:
         return media_bytes
@@ -486,7 +486,7 @@ async def extract_audio_to_wav(
 
 
 async def probe_audio_duration_seconds(
-    audio_bytes: bytes, *, filename: str = "audio.mp3"
+        audio_bytes: bytes, *, filename: str = "audio.mp3"
 ) -> float | None:
     """Probe the duration of audio bytes via ``ffprobe`` (best-effort).
 
@@ -563,15 +563,15 @@ class VoiceSession:
     """
 
     def __init__(
-        self,
-        bot: OpencodeBot,
-        voice_client: discord.voice.VoiceClient,
-        text_channel: discord.TextChannel,
-        session_id: str,
-        mode: str,
-        finalize_callback: Callable[
-            [Optional[object], VoiceSession, str], Awaitable[None]
-        ],  # noqa: F821
+            self,
+            bot: OpencodeBot,
+            voice_client: discord.voice.VoiceClient,
+            text_channel: discord.TextChannel,
+            session_id: str,
+            mode: str,
+            finalize_callback: Callable[
+                [Optional[object], VoiceSession, str], Awaitable[None]
+            ],  # noqa: F821
     ) -> None:
         self.bot = bot
         self.voice_client = voice_client

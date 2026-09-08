@@ -61,9 +61,9 @@ def _auth() -> tuple[str, str] | None:
     if not password:
         return None
     username = (
-        config.opencode_server_username
-        or os.environ.get("OPENCODE_SERVER_USERNAME")
-        or "opencode"
+            config.opencode_server_username
+            or os.environ.get("OPENCODE_SERVER_USERNAME")
+            or "opencode"
     )
     return (username, password)
 
@@ -140,12 +140,12 @@ class OpencodeClient:
     # --- low-level helpers ---
 
     async def _request(
-        self,
-        method: str,
-        path: str,
-        *,
-        directory: str | None = None,
-        **kw: Any,
+            self,
+            method: str,
+            path: str,
+            *,
+            directory: str | None = None,
+            **kw: Any,
     ) -> Any:
         # Optional multi-project routing: when directory is set, inject the
         # x-opencode-directory request header so opencode's workspace-routing
@@ -168,7 +168,7 @@ class OpencodeClient:
         return await self._do_request(client, method, path, **kw)
 
     async def _do_request(
-        self, client: httpx.AsyncClient, method: str, path: str, **kw: Any
+            self, client: httpx.AsyncClient, method: str, path: str, **kw: Any
     ) -> Any:
         resp = await client.request(method, path, **kw)
         if resp.status_code >= 400:
@@ -180,7 +180,7 @@ class OpencodeClient:
         return resp.json()
 
     async def _request_get_with_retry(
-        self, client: httpx.AsyncClient, method: str, path: str, **kw: Any
+            self, client: httpx.AsyncClient, method: str, path: str, **kw: Any
     ) -> Any:
         last_exc: Exception | None = None
         for attempt in range(_GET_RETRY_ATTEMPTS):
@@ -213,14 +213,14 @@ class OpencodeClient:
     # --- sessions ---
 
     async def list_sessions(
-        self, *, directory: str | None = None
+            self, *, directory: str | None = None
     ) -> list[dict]:
         """GET /session — all sessions."""
         result = await self._request("GET", "/session", directory=directory)
         return result if isinstance(result, list) else []
 
     async def create_session(
-        self, title: str | None = None, *, directory: str | None = None
+            self, title: str | None = None, *, directory: str | None = None
     ) -> dict:
         """POST /session — body `{ title? }`, returns the new session."""
         body: dict = {}
@@ -229,13 +229,13 @@ class OpencodeClient:
         return await self._request("POST", "/session", json=body, directory=directory)
 
     async def get_session(
-        self, sid: str, *, directory: str | None = None
+            self, sid: str, *, directory: str | None = None
     ) -> dict:
         """GET /session/{id} — session details."""
         return await self._request("GET", f"/session/{sid}", directory=directory)
 
     async def delete_session(
-        self, sid: str, *, directory: str | None = None
+            self, sid: str, *, directory: str | None = None
     ) -> bool:
         """DELETE /session/{id} — returns bool."""
         return bool(
@@ -243,7 +243,7 @@ class OpencodeClient:
         )
 
     async def abort_session(
-        self, sid: str, *, directory: str | None = None
+            self, sid: str, *, directory: str | None = None
     ) -> bool:
         """POST /session/{id}/abort — abort a running session, returns bool."""
         return bool(
@@ -251,7 +251,7 @@ class OpencodeClient:
         )
 
     async def revert_session(
-        self, sid: str, message_id: str, *, directory: str | None = None
+            self, sid: str, message_id: str, *, directory: str | None = None
     ) -> dict:
         """POST /session/{id}/revert — revert to a user message, returns session.
 
@@ -273,7 +273,7 @@ class OpencodeClient:
         )
 
     async def get_session_status(
-        self, *, directory: str | None = None
+            self, *, directory: str | None = None
     ) -> dict[str, dict]:
         """GET /session/status — ``{ sessionID: SessionStatus }``.
 
@@ -305,7 +305,7 @@ class OpencodeClient:
     # --- messages ---
 
     async def list_messages(
-        self, sid: str, limit: int | None = None, *, directory: str | None = None
+            self, sid: str, limit: int | None = None, *, directory: str | None = None
     ) -> list[dict]:
         """GET /session/{id}/message — `{ info, parts }[]`."""
         params: dict = {}
@@ -371,13 +371,13 @@ class OpencodeClient:
         return {"providerID": provider_id, "modelID": model_id_part}
 
     async def send_message(
-        self,
-        sid: str,
-        parts: list[dict],
-        agent: str | None = None,
-        model: str | None = None,
-        *,
-        directory: str | None = None,
+            self,
+            sid: str,
+            parts: list[dict],
+            agent: str | None = None,
+            model: str | None = None,
+            *,
+            directory: str | None = None,
     ) -> dict:
         """POST /session/{id}/message — synchronous wait for full response.
 
@@ -410,13 +410,13 @@ class OpencodeClient:
         )
 
     async def send_prompt_async(
-        self,
-        sid: str,
-        parts: list[dict],
-        agent: str | None = None,
-        model: str | None = None,
-        *,
-        directory: str | None = None,
+            self,
+            sid: str,
+            parts: list[dict],
+            agent: str | None = None,
+            model: str | None = None,
+            *,
+            directory: str | None = None,
     ) -> None:
         """POST /session/{id}/prompt_async — fire-and-forget (204 No Content).
 
@@ -447,7 +447,7 @@ class OpencodeClient:
     # --- questions ---
 
     async def list_questions(
-        self, *, directory: str | None = None
+            self, *, directory: str | None = None
     ) -> list[dict]:
         """GET /question — all pending question requests across sessions.
 
@@ -486,7 +486,7 @@ class OpencodeClient:
     # --- permissions ---
 
     async def list_permissions(
-        self, *, directory: str | None = None
+            self, *, directory: str | None = None
     ) -> list[dict]:
         """GET /permission — all pending permission requests across sessions.
 
@@ -501,7 +501,7 @@ class OpencodeClient:
         return result if isinstance(result, list) else []
 
     async def reply_permission(
-        self, request_id: str, reply: str, message: str | None = None
+            self, request_id: str, reply: str, message: str | None = None
     ) -> bool:
         """POST /permission/:id/reply — approve/deny a permission request.
 
@@ -521,7 +521,7 @@ class OpencodeClient:
     # part of the typed REST surface for external consumers.
 
     async def list_agents(
-        self, *, directory: str | None = None
+            self, *, directory: str | None = None
     ) -> list[dict]:
         """GET /agent — all available agents (default + plan + custom)."""
         result = await self._request("GET", "/agent", directory=directory)
@@ -557,13 +557,13 @@ class OpencodeClient:
         """
         client = await self._ac()
         async with client.stream(
-            "GET",
-            "/event",
-            headers={"Accept": "text/event-stream"},
-            # The client's default read timeout (60s) would kill a long-lived
-            # SSE stream mid-iteration. Override per-request so the stream
-            # stays open until the server closes it or the caller cancels.
-            timeout=None,
+                "GET",
+                "/event",
+                headers={"Accept": "text/event-stream"},
+                # The client's default read timeout (60s) would kill a long-lived
+                # SSE stream mid-iteration. Override per-request so the stream
+                # stays open until the server closes it or the caller cancels.
+                timeout=None,
         ) as r:
             if r.status_code >= 400:
                 raise OpencodeError(f"GET /event -> {r.status_code}: {r.text[:500]}")
@@ -582,9 +582,9 @@ class OpencodeClient:
                     data_lines = []
                     continue
                 if line.startswith("event:"):
-                    event_type = line[len("event:") :].strip()
+                    event_type = line[len("event:"):].strip()
                 elif line.startswith("data:"):
-                    data_lines.append(line[len("data:") :].lstrip())
+                    data_lines.append(line[len("data:"):].lstrip())
                 # ignore comment lines (:) and unknown fields
             # flush a trailing event if the stream ended without a blank line
             if event_type is not None and data_lines:

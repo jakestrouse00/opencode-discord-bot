@@ -192,8 +192,10 @@ def stub_slug(monkeypatch):
 @pytest.fixture
 def stub_tts(monkeypatch):
     """Patch ``synthesize_speech`` + ``_openai_client`` to no-ops."""
+
     async def _fake_synthesize(text):
         return b"mp3-bytes"
+
     monkeypatch.setattr(voice_module, "synthesize_speech", _fake_synthesize)
 
     def fake_openai_client():
@@ -204,13 +206,17 @@ def stub_tts(monkeypatch):
                     async def create(**kw):
                         class _R:
                             content = b"mp3-bytes"
+
                         return _R()
+
                 class transcriptions:
                     @staticmethod
                     async def create(**kw):
                         class _R:
                             text = "stub transcription"
+
                         return _R()
+
         return _Fake()
 
     monkeypatch.setattr(voice_module, "_openai_client", fake_openai_client)

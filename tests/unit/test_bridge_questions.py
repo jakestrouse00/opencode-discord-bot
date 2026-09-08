@@ -119,6 +119,7 @@ async def test_one_question_posted_and_user_replies():
     async def _stop_after_reply(*a, **kw):
         await asyncio.sleep(0.1)
         stop_event.set()
+
     client.on_call("reply_question", lambda q: asyncio.create_task(_stop_after_reply()))
 
     await bq.poll_pending_requests_rest(
@@ -151,6 +152,7 @@ async def test_permission_posted_and_user_approves():
     async def _stop_after(*a, **kw):
         await asyncio.sleep(0.1)
         stop_event.set()
+
     client.on_call("reply_permission", lambda q: asyncio.create_task(_stop_after()))
 
     await bq.poll_pending_requests_rest(
@@ -194,6 +196,7 @@ async def test_unanswered_question_rejected_on_exit():
     async def _stop_after(*a, **kw):
         await asyncio.sleep(0.2)
         stop_event.set()
+
     # Stop after the first poll surfaces the question (no reply will come).
     client.on_call("list_questions", lambda q: asyncio.create_task(_stop_after()))
 
