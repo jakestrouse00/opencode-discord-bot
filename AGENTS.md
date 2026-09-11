@@ -483,6 +483,16 @@ root: `Dockerfile`, `fly.toml`, `fly.env.example`, `start.sh`,
   - *Pause/resume*: while paused, the poll loop skips `poll_once`
     entirely — nothing is marked seen, so the backlog processes on resume
     (deliberately different semantics from skip: pause HOLDS, skip DROPS).
+  - *Session monitor pause/resume*: `monitor_pause_on`/`monitor_pause_off`
+    mute the session monitor's Discord notifications (questions /
+    permissions / completions) while you're at the computer and can
+    approve directly. While paused the monitor KEEPS polling (tracking
+    stays current) but consumes events silently — request ids are marked
+    seen and completions drop without a post — so nothing from the muted
+    window ever notifies after resume. EPHEMERAL like every other
+    toggle: a restart always resumes notifications. State lives in
+    `dashboard_state` (`is_monitor_paused`), checked once per cycle in
+    `monitor._poll_once`.
   - *Seen-set management*: "mark all current as seen" (bulk-skip
     everything on Comulytic) and "clear seen-set" (destructive —
     everything reprocesses). Both are queued as a pending action in

@@ -313,6 +313,100 @@ class TestPollLoop:
 
 
 # ---------------------------------------------------------------------------
+# Dashboard pause (mute notifications while at the computer)
+# ---------------------------------------------------------------------------
+
+
+class TestMonitorPause:
+    async def test_muted_suppresses_question_embed(self):
+        from opencode_discord_bot import dashboard_state
+
+        client = ScriptedOpencodeClient()
+        channel = FakeMonitorChannel()
+        bot = FakeMonitorBot(client, channel)
+        q = question_request(rid="q-1", sid="sess-mute")
+        client.script("list_questions", [q], [q])
+        dashboard_state.set_monitor_paused(True)
+        try:
+            await _run_cycles(bot, cycles=2)
+        finally:
+            dashboard_state.set_monitor_paused(False)
+        assert channel.sent == []
+
+    async def test_muted_events_not_replayed_on_resume(self):
+        from opencode_discord_bot import dashboard_state
+
+        client = ScriptedOpencodeClient()
+        channel = FakeMonitorChannel()
+        bot = FakeMonitorBot(client, channel)
+        q = question_request(rid="q-1", sid="sess-mute")
+        client.script("list_questions", [q], [q], [q])
+        client.script("get_session", {"id": "sess-mute", "title": "Muted"})
+        # One continuous monitor run: cycle 1 muted (the question is
+        # consumed silently), cycles 2-3 unmuted — the same request is
+        # still pending on the server but must NOT post after resume.
+        # The mute flips off on the 2nd list_questions call via a
+        # side-effect (a fresh `run_monitor` per `_run_cycles` call would
+        # reset the per-loop seen-set; the pause has to happen inside
+        # one loop, as in production).
+        calls = {"n": 0}
+
+        def unmute_after_first(_queue):
+            calls["n"] += 1
+            if calls["n"] >= 2:
+                dashboard_state.set_monitor_paused(False)
+
+        client.on_call("list_questions", unmute_after_first)
+        dashboard_state.set_monitor_paused(True)
+        try:
+            await _run_cycles(bot, cycles=3)
+        finally:
+            dashboard_state.set_monitor_paused(False)
+        assert channel.sent == []
+        # The unmuted cycles saw the same rid but skipped it (already
+        # consumed), and the title fetch never ran (posting was skipped).
+        assert not any(c[0] == "get_session" for c in client.calls)
+
+    async def test_muted_suppresses_completion_embed(self):
+        from opencode_discord_bot import dashboard_state
+
+        client = ScriptedOpencodeClient()
+        channel = FakeMonitorChannel()
+        bot = FakeMonitorBot(client, channel)
+        client.script(
+            "get_session_status", {"sess-c": {"type": "busy"}}, {}, {}
+        )
+        dashboard_state.set_monitor_paused(True)
+        try:
+            await _run_cycles(bot, cycles=2)
+        finally:
+            dashboard_state.set_monitor_paused(False)
+        # Session completed while muted — no embed, no message fetch.
+        assert channel.sent == []
+        assert not any(c[0] == "list_messages" for c in client.calls)
+
+    async def test_unmuted_posts_after_resume(self):
+        from opencode_discord_bot import dashboard_state
+
+        client = ScriptedOpencodeClient()
+        channel = FakeMonitorChannel()
+        bot = FakeMonitorBot(client, channel)
+        dashboard_state.set_monitor_paused(True)
+        try:
+            await _run_cycles(bot, cycles=1)
+        finally:
+            dashboard_state.set_monitor_paused(False)
+        # A NEW question arriving after resume posts normally.
+        q = question_request(rid="q-new", sid="sess-back")
+        client.script("list_questions", [q], [])
+        client.script("get_session", {"id": "sess-back", "title": "Back"})
+        await _run_cycles(bot, cycles=2)
+        embeds = [e for _, e in channel.sent if e is not None]
+        assert len(embeds) == 1
+        assert "Back" in embeds[0].title
+
+
+# ---------------------------------------------------------------------------
 # Per-directory polling (monitor_all_directories)
 # ---------------------------------------------------------------------------
 

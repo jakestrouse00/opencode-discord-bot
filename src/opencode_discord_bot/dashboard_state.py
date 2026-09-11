@@ -44,6 +44,13 @@ from typing import Any
 _skip_transcription: bool = False
 _paused: bool = False
 
+# Monitor pause (dashboard -> monitor). While ON the session monitor keeps
+# polling the opencode server but MUTES every Discord notification (no
+# question/permission/completion embeds) and marks events as seen as if
+# they had been posted — so nothing that happened while paused ever
+# notifies on resume. Like the bridge flags: EPHEMERAL, resets on restart.
+_monitor_paused: bool = False
+
 # Pending seen-set action for the bridge to apply on its next poll cycle:
 # None | "mark_all_seen" | "clear_seen". Seen-set writes are bridge-owned,
 # so the dashboard only queues the intent here.
@@ -71,6 +78,17 @@ def is_paused() -> bool:
 def set_paused(value: bool) -> None:
     global _paused
     _paused = bool(value)
+
+
+def is_monitor_paused() -> bool:
+    """True iff the session monitor is muted (polling continues; Discord
+    notifications are suppressed and treated as consumed)."""
+    return _monitor_paused
+
+
+def set_monitor_paused(value: bool) -> None:
+    global _monitor_paused
+    _monitor_paused = bool(value)
 
 
 def request_action(action: str) -> None:
@@ -190,12 +208,13 @@ def register_seen(seen: set[str]) -> None:
 def reset() -> None:
     """Reset all state to defaults (test helper; also the honest answer to
     'what does a restart do' — everything resets)."""
-    global _skip_transcription, _paused, _pending_action
+    global _skip_transcription, _paused, _monitor_paused, _pending_action
     global _in_flight_task, _in_flight_note_id
     global _processed, _skipped, _failed, _last_poll_at, _last_poll_status
     global _seen_ref, _started_at
     _skip_transcription = False
     _paused = False
+    _monitor_paused = False
     _pending_action = None
     _in_flight_task = None
     _in_flight_note_id = None
@@ -215,6 +234,7 @@ def snapshot() -> dict[str, Any]:
     return {
         "skip_transcription": _skip_transcription,
         "paused": _paused,
+        "monitor_paused": _monitor_paused,
         "pending_action": _pending_action,
         "processed": _processed,
         "skipped": _skipped,

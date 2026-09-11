@@ -10,9 +10,11 @@ Two tabs in one self-contained HTML page:
 * **Stats** — bridge metrics (processed/skipped/failed, last poll, in-flight),
   system health (uptime, RSS), session bindings (read-only render of both
   router JSON files), and the last ~500 log lines (in-memory ring).
-* **Controls** — skip-transcription toggle, bridge pause/resume, live config
-  tweaks (poll interval/page size/max duration), seen-set management
-  (mark-all-current-as-seen, clear seen-set), and abort-in-flight.
+* **Controls** — skip-transcription toggle, bridge pause/resume, session
+  monitor pause/resume (mute Discord notifications while you're at the
+  computer), live config tweaks (poll interval/page size/max duration),
+  seen-set management (mark-all-current-as-seen, clear seen-set), and
+  abort-in-flight.
 
 Auth: every request (page + API) must present the shared secret via
 ``Authorization: Bearer <token>`` or ``?token=<token>`` (constant-time
@@ -25,6 +27,10 @@ Control semantics (all EPHEMERAL — a restart resets every toggle):
   switch). Recordings skipped this way are silently dropped.
 * pause: the bridge skips poll cycles entirely — nothing is marked seen,
   so the backlog processes on resume.
+* monitor pause: the session monitor keeps polling but posts nothing —
+  events observed while paused are marked seen / tracked as consumed, so
+  they never notify on resume (use while at the computer; restart always
+  resumes notifications).
 * seen-set actions are queued (``dashboard_state.request_action``) and
   applied by the bridge task at the top of its next poll cycle — the bridge
   owns all writes to ``.comulytic-seen.json``.
@@ -61,6 +67,8 @@ _CONTROL_ACTIONS = frozenset(
         "skip_off",
         "pause_on",
         "pause_off",
+        "monitor_pause_on",
+        "monitor_pause_off",
         "abort",
         "mark_all_seen",
         "clear_seen",
@@ -143,6 +151,10 @@ async def api_stats(request: Request) -> JSONResponse:
             "enabled": _bridge_enabled(),
             **dashboard_state.snapshot(),
         },
+        "monitor": {
+            "enabled": bool(config.monitor_enabled and config.monitor_channel_id),
+            "paused": dashboard_state.is_monitor_paused(),
+        },
         "config": {
             "comulytic_poll_interval_seconds": config.comulytic_poll_interval_seconds,
             "comulytic_poll_page_size": config.comulytic_poll_page_size,
@@ -185,6 +197,10 @@ async def api_control(request: Request) -> JSONResponse:
         dashboard_state.set_paused(True)
     elif action == "pause_off":
         dashboard_state.set_paused(False)
+    elif action == "monitor_pause_on":
+        dashboard_state.set_monitor_paused(True)
+    elif action == "monitor_pause_off":
+        dashboard_state.set_monitor_paused(False)
     elif action == "abort":
         aborted = dashboard_state.abort_in_flight()
         return JSONResponse({"action": action, "aborted": aborted})
@@ -304,6 +320,9 @@ _PAGE_HTML = """<!DOCTYPE html>
     <div class="grid" id="bridge-stats"></div>
     <div class="toggle-note" id="bridge-flags"></div>
   </div>
+  <div class="card"><h2>Session monitor</h2>
+    <div class="toggle-note" id="monitor-flags"></div>
+  </div>
   <div class="card"><h2>System</h2>
     <div class="grid" id="sys-stats"></div>
   </div>
@@ -339,6 +358,17 @@ _PAGE_HTML = """<!DOCTYPE html>
     <div class="toggle-note">Paused = poll cycles skipped entirely; nothing is
       marked seen, so the backlog processes on resume. (Different from skip:
       skip DROPS recordings silently; pause HOLDS them.)</div>
+  </div>
+  <div class="card"><h2>Session monitor pause / resume</h2>
+    <div class="controls">
+      <button class="btn" id="btn-mon-pause" onclick="act('monitor_pause_on')">Pause monitor notifications</button>
+      <button class="btn" id="btn-mon-resume" onclick="act('monitor_pause_off')">Resume monitor notifications</button>
+    </div>
+    <div class="toggle-note">Paused = the monitor keeps watching the opencode
+      server but posts NO Discord notifications for questions, permissions, or
+      completions — for when you're at the computer and can see/approve
+      requests directly. Events during the pause are never notified on
+      resume. Resets to RUNNING on restart.</div>
   </div>
   <div class="card"><h2>Abort in-flight processing</h2>
     <div class="controls">
@@ -405,11 +435,16 @@ async function refresh() {
       `paused: ${b.paused ? "PAUSED" : "running"}  |  bridge: ` +
       `${b.enabled ? "enabled" : "disabled"}` +
       (b.pending_action ? `  |  pending: ${b.pending_action}` : "");
+    document.getElementById("monitor-flags").textContent =
+      `session monitor: ${s.monitor && s.monitor.enabled ? "enabled" : "disabled"}  |  ` +
+      `notifications: ${s.monitor && s.monitor.paused ? "PAUSED (muted)" : "running"}`;
     document.getElementById("sys-stats").innerHTML =
       stat("uptime", Math.floor(s.uptime_s / 60) + "m " + Math.floor(s.uptime_s % 60) + "s") +
       stat("RSS", s.rss_kb ? (s.rss_kb / 1024).toFixed(0) + " MiB" : "n/a");
     document.getElementById("btn-skip").classList.toggle("on", b.skip_transcription);
     document.getElementById("btn-pause").classList.toggle("on", b.paused);
+    document.getElementById("btn-mon-pause").classList.toggle(
+      "on", s.monitor && s.monitor.paused);
 
     const rows = (b.recent || []).map(r =>
       `<tr><td>${esc(r.note_id)}</td><td>${esc(r.status)}</td><td>${esc(r.seconds)}</td>

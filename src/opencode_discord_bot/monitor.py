@@ -50,6 +50,14 @@ wire format proved fragile to parse — see `events.py` and the
 button UI uses (`questions.py:poll_pending_requests`) are polled here at
 `config.monitor_poll_interval_seconds`.
 
+DASHBOARD PAUSE: `dashboard_state.is_monitor_paused()` (flipped from the
+dashboard's Controls tab) mutes the monitor without stopping it. While
+paused, poll cycles keep running (so busy-session tracking stays
+current) but `_post` is skipped entirely — and events observed while
+paused are marked seen / tracked as if they had been posted, so a
+question you answered at your desktop never pings your phone after you
+resume. The flag is EPHEMERAL: a restart always resumes notifications.
+
 Lifecycle: spawned as an in-process `asyncio.create_task` from
 `OpencodeBot.on_connect` (gated on `config.monitor_enabled` +
 `config.monitor_channel_id`), crash-isolated by a guard wrapper in
@@ -65,6 +73,7 @@ import logging
 
 import discord
 
+from opencode_discord_bot import dashboard_state
 from opencode_discord_bot.config import config
 from opencode_discord_bot.opencode_client import OpencodeClient
 from opencode_discord_bot.text_utils import (
@@ -413,6 +422,10 @@ async def _poll_once(bot, client: OpencodeClient, state: _MonitorState) -> None:
             permissions.append((d, req))
 
     excluded = _excluded_sids(bot)
+    # Read once per cycle: while muted, events are consumed (marked seen /
+    # tracked) but never posted, so nothing from the muted window notifies
+    # later on resume.
+    muted = dashboard_state.is_monitor_paused()
 
     # --- question + permission events (new, non-excluded request ids) ---
     for d, req in questions:
@@ -423,6 +436,8 @@ async def _poll_once(bot, client: OpencodeClient, state: _MonitorState) -> None:
         if not rid or rid in state.seen_questions or sid in excluded:
             continue
         state.seen_questions.add(rid)
+        if muted:
+            continue
         directory = d if d is not None else state.sid_directory.get(sid)
         title = await _fetch_title(client, sid, directory)
         await _post(
@@ -439,6 +454,8 @@ async def _poll_once(bot, client: OpencodeClient, state: _MonitorState) -> None:
         if not rid or rid in state.seen_permissions or sid in excluded:
             continue
         state.seen_permissions.add(rid)
+        if muted:
+            continue
         directory = d if d is not None else state.sid_directory.get(sid)
         title = await _fetch_title(client, sid, directory)
         await _post(
@@ -465,7 +482,7 @@ async def _poll_once(bot, client: OpencodeClient, state: _MonitorState) -> None:
             # Left the map (idle) — completed. Excluded sessions are
             # dropped from tracking without a notification.
             state.busy.discard(sid)
-            if sid in excluded:
+            if sid in excluded or muted:
                 continue
             directory = state.sid_directory.get(sid)
             title = await _fetch_title(client, sid, directory)

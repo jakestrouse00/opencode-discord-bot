@@ -104,6 +104,24 @@ def test_control_pause_toggle(client):
     assert ds.is_paused() is False
 
 
+def test_control_monitor_pause_toggle(client):
+    client.post("/api/control?token=tok", json={"action": "monitor_pause_on"})
+    assert ds.is_monitor_paused() is True
+    client.post("/api/control?token=tok", json={"action": "monitor_pause_off"})
+    assert ds.is_monitor_paused() is False
+
+
+def test_stats_monitor_block(client, monkeypatch):
+    monkeypatch.setattr(config, "monitor_enabled", True)
+    monkeypatch.setattr(config, "monitor_channel_id", 123)
+    body = client.get("/api/stats?token=tok").json()
+    assert body["monitor"]["enabled"] is True
+    assert body["monitor"]["paused"] is False
+    client.post("/api/control?token=tok", json={"action": "monitor_pause_on"})
+    body = client.get("/api/stats?token=tok").json()
+    assert body["monitor"]["paused"] is True
+
+
 def test_control_seen_actions_queue_pending(client):
     client.post("/api/control?token=tok", json={"action": "mark_all_seen"})
     assert ds.take_pending_action() == "mark_all_seen"

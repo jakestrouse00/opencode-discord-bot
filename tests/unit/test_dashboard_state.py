@@ -23,6 +23,7 @@ def _reset_state():
 def test_default_flags_off():
     assert ds.is_skipping_transcription() is False
     assert ds.is_paused() is False
+    assert ds.is_monitor_paused() is False
     assert ds.pending_action() is None
     assert ds.in_flight_note_id() is None
 
@@ -39,6 +40,15 @@ def test_paused_setter():
     assert ds.is_paused() is True
     ds.set_paused(False)
     assert ds.is_paused() is False
+
+
+def test_monitor_paused_setter():
+    ds.set_monitor_paused(True)
+    assert ds.is_monitor_paused() is True
+    assert ds.snapshot()["monitor_paused"] is True
+    ds.set_monitor_paused(False)
+    assert ds.is_monitor_paused() is False
+    assert ds.snapshot()["monitor_paused"] is False
 
 
 def test_counters():

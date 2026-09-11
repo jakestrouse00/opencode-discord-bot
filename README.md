@@ -328,6 +328,11 @@ Tailscale tunnel the rest of the bot uses. Set
 `MONITOR_ENABLED=true MONITOR_USER_ID=<your id>` as Fly secrets (or in
 `/data/.env` — none of the monitor vars are sensitive).
 
+**Pausing notifications:** when you're back at the computer, use the
+dashboard Controls tab → "Session monitor pause / resume" to mute
+monitor notifications. While paused the monitor keeps polling but posts
+nothing; events during the pause are never replayed on resume.
+
 ## Dashboard (optional, token-gated)
 
 The bot can serve an in-process ops dashboard for watching + controlling the
@@ -347,6 +352,7 @@ log lines — no more `flyctl logs` for recent history.
 |---|---|
 | Skip transcription ON/OFF | While ON, every NEW recording from Comulytic is marked processed (seen) but never transcribed or routed to Bobby — the accidental-recording kill switch. |
 | Pause / resume polling | Paused = poll cycles skipped entirely; nothing is marked seen, so the backlog processes on resume. (Pause HOLDS; skip DROPS.) |
+| Pause / resume session monitor | Paused = the monitor keeps watching your opencode server but posts NO Discord notifications (questions, permissions, completions) — for when you're at the computer and can see/approve requests directly. Events during the pause never notify on resume. Resets to running on restart. |
 | Abort current recording | Cancels the recording being transcribed right now (it's already marked seen — it won't reprocess). |
 | Mark ALL current recordings as seen | Bulk-skips everything currently on Comulytic with one click. |
 | Clear seen-set | Destructive: everything on Comulytic reprocesses on the next cycle. |
