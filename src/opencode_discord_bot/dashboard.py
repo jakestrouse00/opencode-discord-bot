@@ -37,6 +37,12 @@ Control semantics (all EPHEMERAL — a restart resets every toggle):
 * abort cancels the in-flight recording task only (never the bridge task).
 * live config tweaks mutate the ``config`` singleton in place; a restart
   reverts to ``.env``/secrets values.
+
+Installable as a home-screen web app (iOS/Android): the page serves a
+token-gated ``/manifest.webmanifest`` + PNG app icons
+(``src/opencode_discord_bot/dashboard_static/``) and declares the
+apple-touch-icon / manifest links with the token in their query strings,
+so "Add to Home Screen" launches a standalone, already-authenticated app.
 """
 
 from __future__ import annotations
@@ -44,8 +50,10 @@ from __future__ import annotations
 import asyncio
 import json
 import secrets as py_secrets
+from importlib import resources
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -129,6 +137,37 @@ def _rss_kb() -> int | None:
 
 def _bridge_enabled() -> bool:
     return bool(config.comulytic_enabled and config.comulytic_jwt)
+
+
+_ICON_SIZES = (180, 192, 512)
+
+# Traversable of the packaged PNG app icons (dashboard_static/ ships in the
+# wheel via hatchling's default non-.py inclusion for `packages`). Loaded
+# lazily once, then cached as raw bytes so every icon request is a memcpy.
+_icons_traversable = None
+_icon_cache: dict[int, bytes] = {}
+
+
+def _icon_bytes(size: int) -> bytes | None:
+    """PNG bytes for the app icon of ``size`` px, or None if missing."""
+    if size in _icon_cache:
+        return _icon_cache[size]
+    global _icons_traversable
+    if _icons_traversable is None:
+        try:
+            _icons_traversable = resources.files(
+                "opencode_discord_bot"
+            ).joinpath("dashboard_static")
+        except ModuleNotFoundError:  # pragma: no cover — broken install
+            return None
+    try:
+        data = (
+            _icons_traversable.joinpath(f"icon-{size}.png").read_bytes()
+        )
+    except (OSError, FileNotFoundError):  # pragma: no cover — broken install
+        return None
+    _icon_cache[size] = data
+    return data
 
 
 # ---------------------------------------------------------------------------
@@ -260,6 +299,62 @@ async def api_config(request: Request) -> JSONResponse:
 
 
 # ---------------------------------------------------------------------------
+# PWA install surface (manifest + icons) — token-gated like every other
+# route; hrefs in the HTML carry ?token= so iOS can fetch them without a
+# separate auth handshake.
+# ---------------------------------------------------------------------------
+
+
+async def manifest(request: Request) -> Response:
+    if not _authorized(request):
+        return _unauthorized()
+    token = _token_from_request(request)
+    tok = quote(token, safe="")
+    icons = [
+        {
+            "src": f"/icon-{size}.png?token={tok}",
+            "sizes": f"{size}x{size}",
+            "type": "image/png",
+            "purpose": "any",
+        }
+        for size in _ICON_SIZES
+    ]
+    return JSONResponse(
+        {
+            "name": "opencode-discord-bot dashboard",
+            "short_name": "OC Bot",
+            "description": "Ops dashboard for the opencode Discord bot",
+            "start_url": f"/?token={tok}",
+            "scope": "/",
+            "display": "standalone",
+            "background_color": "#14161a",
+            "theme_color": "#14161a",
+            "icons": icons,
+        },
+        media_type="application/manifest+json",
+    )
+
+
+async def icon(request: Request) -> Response:
+    if not _authorized(request):
+        return _unauthorized()
+    try:
+        size = int(request.path_params["size"])
+    except (KeyError, ValueError):
+        return JSONResponse({"error": "bad size"}, status_code=404)
+    if size not in _ICON_SIZES:
+        return JSONResponse({"error": "unknown size"}, status_code=404)
+    data = _icon_bytes(size)
+    if data is None:
+        return JSONResponse({"error": "icon missing"}, status_code=404)
+    return Response(
+        data,
+        media_type="image/png",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+# ---------------------------------------------------------------------------
 # HTML page (self-contained; the token lives in the URL query and is copied
 # into the fetch calls client-side)
 # ---------------------------------------------------------------------------
@@ -268,12 +363,24 @@ _PAGE_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>opencode-discord-bot dashboard</title>
+<meta name="theme-color" content="#14161a">
+<link rel="manifest" href="/manifest.webmanifest?token=__PWA_TOKEN__">
+<link rel="apple-touch-icon" href="/icon-180.png?token=__PWA_TOKEN__">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="OC Bot">
 <style>
   :root { color-scheme: dark; }
   body { font-family: system-ui, sans-serif; background: #14161a; color: #d7dce3;
-         margin: 0; padding: 1rem; }
+          margin: 0; padding: 1rem;
+          /* notch/home-indicator safe areas (iOS standalone) */
+          padding-left: max(1rem, env(safe-area-inset-left));
+          padding-right: max(1rem, env(safe-area-inset-right));
+          padding-top: max(1rem, env(safe-area-inset-top));
+          padding-bottom: max(1rem, env(safe-area-inset-bottom)); }
   h1 { font-size: 1.2rem; margin: 0 0 1rem; }
   .tabs { display: flex; gap: .5rem; margin-bottom: 1rem; }
   .tabs button { padding: .45rem 1rem; border: 1px solid #333a44; border-radius: 6px;
@@ -306,6 +413,41 @@ _PAGE_HTML = """<!DOCTYPE html>
   .cfg-row { display: flex; flex-wrap: wrap; gap: .9rem; margin-bottom: .6rem; }
   .err { color: #ff7b72; font-size: .8rem; margin-top: .4rem; }
   #refresh-ts { font-size: .72rem; color: #6e7681; }
+  /* --- Mobile (portrait phone) pass. Every desktop rule above is
+     untouched; everything below applies only at <= 640px. --- */
+  @media (max-width: 640px) {
+    body { padding: .6rem;
+           padding-left: max(.6rem, env(safe-area-inset-left));
+           padding-right: max(.6rem, env(safe-area-inset-right));
+           padding-top: max(.6rem, env(safe-area-inset-top));
+           padding-bottom: max(.6rem, env(safe-area-inset-bottom)); }
+    .card { padding: .7rem .8rem; }
+    .tabs { position: sticky; top: env(safe-area-inset-top); z-index: 10;
+            background: #14161a; padding: .4rem 0; margin: 0 0 .8rem; }
+    .tabs button { min-height: 44px; flex: 1; box-sizing: border-box; }
+    .controls { display: block; }
+    .controls .btn { display: block; width: 100%; min-height: 44px;
+                     margin-bottom: .5rem; box-sizing: border-box; }
+    .btn { min-height: 44px; box-sizing: border-box; }
+    .cfg-row { display: grid; grid-template-columns: 1fr 1fr; gap: .6rem; }
+    .cfg-row button { grid-column: 1 / -1; width: 100%; }
+    input { font-size: 16px; width: 100%; box-sizing: border-box; }
+    /* Recent recordings: table becomes stacked label/value cards. */
+    #recent-table, #recent-table tbody, #recent-table tr,
+    #recent-table td { display: block; }
+    #recent-table thead { display: none; }
+    #recent-table tr { background: #14161a; border-radius: 6px;
+                       padding: .4rem .5rem; margin-bottom: .5rem;
+                       font-size: .78rem; }
+    #recent-table td { border: none; padding: .15rem 0;
+                       overflow-wrap: anywhere; }
+    #recent-table td::before { content: attr(data-label) " ";
+                               font-size: .68rem; text-transform: uppercase;
+                               color: #7d8794; }
+    .logs { max-height: 300px; }
+    code { overflow-wrap: anywhere; }
+    .stat .v { overflow-wrap: anywhere; }
+  }
 </style>
 </head>
 <body>
@@ -447,8 +589,10 @@ async function refresh() {
       "on", s.monitor && s.monitor.paused);
 
     const rows = (b.recent || []).map(r =>
-      `<tr><td>${esc(r.note_id)}</td><td>${esc(r.status)}</td><td>${esc(r.seconds)}</td>
-       <td>${esc(new Date(r.at * 1000).toLocaleTimeString())}</td></tr>`).join("");
+      `<tr><td data-label="note id">${esc(r.note_id)}</td>` +
+      `<td data-label="status">${esc(r.status)}</td>` +
+      `<td data-label="seconds">${esc(r.seconds)}</td>` +
+      `<td data-label="at">${esc(new Date(r.at * 1000).toLocaleTimeString())}</td></tr>`).join("");
     document.querySelector("#recent-table tbody").innerHTML =
       rows || "<tr><td colspan=4>no recordings yet</td></tr>";
 
@@ -534,13 +678,21 @@ setInterval(refresh, 5000);
 async def index(request: Request) -> Response:
     if not _authorized(request):
         return _unauthorized()
-    return Response(_PAGE_HTML, media_type="text/html")
+    # Interpolate the token into the manifest / apple-touch-icon hrefs so
+    # the home-screen web app can fetch its icons + manifest (and relaunch
+    # via start_url) already authenticated — the token would otherwise be
+    # lost when iOS fetches these outside the page's JS context.
+    token = _token_from_request(request)
+    html = _PAGE_HTML.replace("__PWA_TOKEN__", quote(token, safe=""))
+    return Response(html, media_type="text/html")
 
 
 def create_app() -> Starlette:
     return Starlette(
         routes=[
             Route("/", index, methods=["GET"]),
+            Route("/manifest.webmanifest", manifest, methods=["GET"]),
+            Route("/icon-{size:int}.png", icon, methods=["GET"]),
             Route("/api/stats", api_stats, methods=["GET"]),
             Route("/api/logs", api_logs, methods=["GET"]),
             Route("/api/control", api_control, methods=["POST"]),

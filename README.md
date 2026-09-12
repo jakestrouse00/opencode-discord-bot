@@ -358,6 +358,13 @@ log lines — no more `flyctl logs` for recent history.
 | Clear seen-set | Destructive: everything on Comulytic reprocesses on the next cycle. |
 | Live config | Change poll interval, page size, and the max-duration cap on the running process (reverts on restart). |
 
+**Install to your phone's home screen:** the dashboard is an installable web
+app. On iPhone: open `https://<host>/?token=<token>` in Safari → Share →
+**Add to Home Screen**. It launches full-screen (no browser chrome) with its
+own app icon, already authenticated — no need to re-enter the token. Works
+the same on Android via Chrome → Install app. The manifest + icon routes
+are token-gated like everything else (append `?token=<t>` to their URLs).
+
 ### On Fly.io
 
 The app's `[[services]]` block maps `https://opencode-discord-bot.fly.dev` to

@@ -215,3 +215,47 @@ def test_session_bindings_read_from_disk(client, monkeypatch, tmp_path):
     body = client.get("/api/stats?token=tok").json()
     assert body["sessions"]["bot"] == {"123": "ses-bot-1"}
     assert body["sessions"]["bridge"] == {"456": "ses-bridge-1"}
+
+
+# --- PWA install surface (home-screen web app) -----------------------------
+
+
+def test_index_has_pwa_meta_tags(client):
+    html = client.get("/?token=tok").text
+    assert 'rel="manifest"' in html
+    assert "/manifest.webmanifest?token=tok" in html
+    assert 'rel="apple-touch-icon"' in html
+    assert "/icon-180.png?token=tok" in html
+    assert 'name="apple-mobile-web-app-capable"' in html
+    assert "__PWA_TOKEN__" not in html
+
+
+def test_manifest_served_with_token(client):
+    r = client.get("/manifest.webmanifest?token=tok")
+    assert r.status_code == 200
+    assert "manifest" in r.headers["content-type"]
+    m = r.json()
+    assert m["display"] == "standalone"
+    assert m["start_url"] == "/?token=tok"
+    assert {i["sizes"] for i in m["icons"]} == {"180x180", "192x192", "512x512"}
+    assert all(i["src"].endswith("?token=tok") for i in m["icons"])
+
+
+def test_manifest_and_icons_require_auth(client):
+    assert client.get("/manifest.webmanifest").status_code == 401
+    assert client.get("/manifest.webmanifest?token=wrong").status_code == 401
+    assert client.get("/icon-180.png").status_code == 401
+    assert client.get("/icon-180.png?token=wrong").status_code == 401
+
+
+def test_icon_served(client):
+    r = client.get("/icon-180.png?token=tok")
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "image/png"
+    assert r.content[:8] == b"\x89PNG\r\n\x1a\n"
+    for size in (192, 512):
+        assert client.get(f"/icon-{size}.png?token=tok").status_code == 200
+
+
+def test_icon_unknown_size_404(client):
+    assert client.get("/icon-999.png?token=tok").status_code == 404

@@ -513,6 +513,22 @@ root: `Dockerfile`, `fly.toml`, `fly.env.example`, `start.sh`,
   `starlette.testclient.TestClient` (httpx transport — no server, no
   network). The dashboard is NOT started from the standalone
   `comulytic-bridge` console script (bot-process lifecycle only).
+  **PWA install surface:** the page is installable to a phone home screen
+  as a standalone web app — it declares a `manifest.webmanifest` +
+  `apple-touch-icon` link whose hrefs carry `?token=` (interpolated
+  server-side in `index()` via the `__PWA_TOKEN__` placeholder,
+  URL-encoded), plus iOS standalone meta tags
+  (`apple-mobile-web-app-capable`, `status-bar-style`,
+  `viewport-fit=cover` + `env(safe-area-inset-*)` padding for the notch).
+  Two token-gated routes serve the install assets:
+  `GET /manifest.webmanifest` (display=standalone, start_url=/?token=…,
+  theme/background #14161a) and `GET /icon-{180,192,512}.png` (PNG bytes
+  from `dashboard_static/`, loaded via `importlib.resources` +
+  per-process cached). Icons are generated (Pillow script, one-off) — a
+  `>_` terminal glyph, dark bg #1d2127, blue accent — and ship in the
+  wheel via hatchling's default non-`.py` inclusion for `packages`. Keep
+  the `__PWA_TOKEN__` placeholder in the hrefs: iOS fetches the manifest
+  + icon outside the page's JS context, so the token must be in the URL.
 - **Session monitor** (`monitor.py`): a read-only background poll loop that
   watches the opencode server for DESKTOP-session events and posts an embed
   per event to `config.monitor_channel_id` (default channel
