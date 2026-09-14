@@ -154,8 +154,31 @@ class TestLooksLikePrompt:
         text = "[DISCORD_BOT]\n[COMULYTIC_BRIDGE]\n\nthe transcript"
         assert _looks_like_prompt(text) is True
 
-    def test_tag_anywhere_in_text_detected(self):
-        assert _looks_like_prompt("some preamble\n[DISCORD_BOT]\nrest") is True
+    def test_tag_at_start_detected(self):
+        # A leaked prompt always STARTS with the directive tag (it's line 1
+        # of the prompt the bridge builds).
+        assert _looks_like_prompt("some preamble\n[DISCORD_BOT]\nrest") is False
+
+    def test_tag_mid_text_not_detected(self):
+        # Regression (real incident, session ses_f5f88d995ffekLh1S9xk856UVs):
+        # the agent's reasoning legitimately references the directive tags
+        # (e.g. "... since [DISCORD_BOT] was present") because its own
+        # instructions mention them — that is NOT a prompt leak. The old
+        # substring-anywhere match suppressed the real reply and the bridge
+        # posted "No agent text output found".
+        text = (
+            "The answer is here.\n\n"
+            "I need to emit the preamble + summary block (per Step 7, "
+            "since [DISCORD_BOT] was present)."
+        )
+        assert _looks_like_prompt(text) is False
+
+    def test_reasoning_quoting_tag_not_detected(self):
+        text = "since [COMULYTIC_BRIDGE] is present, keep it brief"
+        assert _looks_like_prompt(text) is False
+
+    def test_leading_whitespace_before_tag_detected(self):
+        assert _looks_like_prompt("  [DISCORD_BOT]\nrest") is True
 
 
 class TestSlugifyPrompt:

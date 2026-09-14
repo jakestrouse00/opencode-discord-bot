@@ -133,18 +133,21 @@ def _looks_like_prompt(text: str) -> bool:
 
     The Comulytic bridge prepends ``[DISCORD_BOT]`` and ``[COMULYTIC_BRIDGE]``
     directive lines to the prompt it sends to oc-assistant
-    (bridge.py:route_to_assistant, ~line 1003-1005). Those tags are stripped
-    by the agent before processing and never appear in an agent's output.
-    If the extracted "final assistant text" contains either tag, it is
-    almost certainly the user prompt that leaked through (e.g. via a
-    fallback to a non-assistant message, or a malformed message list) — not
-    a real reply. Used by the bridge as a belt-and-suspenders regression
-    guard so a leak is caught and logged instead of posted to the Discord
-    channel as the "response".
+    (bridge.py:route_to_assistant, ~line 1003-1005) — and a leaked prompt
+    therefore STARTS with one of those tags, since they are always line 1
+    of the prompt. The match is anchored to the start of the text
+    (after stripping leading whitespace): a substring-anywhere match
+    false-positives on legitimate agent replies, because the agent's own
+    instructions reference the tags (e.g. oc-assistant.md Step 7 tells it
+    to emit a preamble "when [DISCORD_BOT] was present", and that phrase
+    legitimately appears in its reasoning parts). Used by the bridge as a
+    belt-and-suspenders regression guard so a leak is caught and logged
+    instead of posted to the Discord channel as the "response".
     """
     if not text:
         return False
-    return any(tag in text for tag in _DIRECTIVE_TAGS)
+    stripped = text.lstrip()
+    return any(stripped.startswith(tag) for tag in _DIRECTIVE_TAGS)
 
 
 def _slugify_prompt(prompt: str, fallback: str) -> str:
