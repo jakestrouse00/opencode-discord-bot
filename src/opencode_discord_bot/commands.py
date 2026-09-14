@@ -1341,9 +1341,19 @@ class OpencodeBot(discord.Bot):
 
             try:
                 messages = await self.client.list_messages(sid)
-            except OpencodeError as e:
+            except Exception as e:  # noqa: BLE001 — OpencodeError AND raw httpx.TransportError
+                # The GET-retry wrapper in opencode_client re-raises exhausted
+                # httpx.TransportError raw (not wrapped in OpencodeError), and
+                # the catch must cover both — otherwise a Tailscale/desktop
+                # blip at exactly the wrong moment kills the drive silently
+                # with no terminal message posted to the channel.
                 _log.warning("session %s list_messages failed: %r", sid, e)
-                await send_chunk(f"Failed to fetch final messages: {e}")
+                try:
+                    await send_chunk(f"Failed to fetch final messages: {e}")
+                except Exception:  # noqa: BLE001 — Discord send failure; nothing left to try
+                    _log.exception(
+                        "session %s: failed to post the list_messages error", sid
+                    )
                 return None
             final_text = _final_assistant_text(messages)
             if not final_text:
@@ -1361,6 +1371,25 @@ class OpencodeBot(discord.Bot):
             for chunk in chunks:
                 await send_chunk(chunk)
             return final_text
+        except Exception as e:  # noqa: BLE001 — the drive must ALWAYS terminate visibly
+            # Catch-all of last resort: any unexpected failure inside the
+            # drive body (send_chunk Discord HTTP errors, response parsing,
+            # client bugs, ...) previously propagated silently, leaving the
+            # channel stuck on "Working…" forever with no reply. Post a
+            # terminal error message so the user always knows the drive
+            # ended. CancelledError derives from BaseException and is NOT
+            # caught here (it must propagate for abort/shutdown).
+            _log.exception("session %s drive failed unexpectedly", sid)
+            try:
+                await send_chunk(
+                    f"Session `{sid}` drive ended with an error: "
+                    f"{type(e).__name__}: {e}"
+                )
+            except Exception:  # noqa: BLE001 — Discord send failed; nothing left to try
+                _log.exception(
+                    "session %s: failed to post the drive-error message", sid
+                )
+            return None
         finally:
             stop_event.set()
             try:
