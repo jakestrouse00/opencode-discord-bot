@@ -50,6 +50,18 @@ wire format proved fragile to parse — see `events.py` and the
 button UI uses (`questions.py:poll_pending_requests`) are polled here at
 `config.monitor_poll_interval_seconds`.
 
+BOUNDED FETCHES: every fan-out gather and every auxiliary fetch (project
+discovery, session title, completion snippet) is wrapped in a hard
+`asyncio.wait_for` bound (`_FETCH_TIMEOUT` / `_AUX_TIMEOUT`). The shared
+`OpencodeClient` allows a 60s read timeout with 3 retry attempts per GET —
+without a bound, one hung GET (server busy, tunnel blip) stalls a poll
+cycle for minutes and every event observed since clumps into one late
+batch. On a bound timeout the fetch is skipped for the cycle and retried
+next cycle. A failed/timed-out STATUS poll also never reads as "completed":
+completion detection only fires for sessions whose directory actually
+reported this cycle, and a failed Discord send is retried next cycle
+(the request id / busy-tracking is un-marked so nothing is lost).
+
 DASHBOARD PAUSE: `dashboard_state.is_monitor_paused()` (flipped from the
 dashboard's Controls tab) mutes the monitor without stopping it. While
 paused, poll cycles keep running (so busy-session tracking stays
@@ -88,6 +100,39 @@ _log = logging.getLogger("bot.monitor")
 # Embed descriptions cap at 4096 chars; 300 keeps the notification compact
 # (it's a ping, not a transcript — the full text is on the desktop).
 _SNIPPET_MAX = 300
+
+# Hard per-fetch timeout for the three fan-out polls (status/questions/
+# permissions per directory). The shared OpencodeClient allows a 60s read
+# timeout x 3 retry attempts per GET, so an unbounded gather could stall a
+# poll cycle for minutes when the server/tunnel hiccups — every event
+# observed since then clumps into one late batch. The bound keeps each
+# cycle's worst-case stall short; a skipped directory is simply retried on
+# the next cycle.
+_FETCH_TIMEOUT = 10.0
+
+# Aux fetches (project discovery, session title, completion snippet) are
+# cosmetic or retryable — give them a slightly smaller bound. A timed-out
+# aux fetch degrades (no title / no snippet / cwd-only fallback) without
+# delaying the cycle.
+_AUX_TIMEOUT = 5.0
+
+# Sentinel default for `_bounded` so a TIMED-OUT fan-out poll is
+# distinguishable from a poll that legitimately returned an empty map/list.
+_FETCH_FAILED = object()
+
+
+async def _bounded(awaitable, timeout: float, what: str, default):
+    """Await `awaitable` with a hard timeout; return `default` on overrun.
+
+    Logs a warning on timeout (not on exceptions — callers handle those
+    themselves where a non-default recovery exists). The inner task is
+    cancelled on overrun so a hung response can't keep the cycle waiting.
+    """
+    try:
+        return await asyncio.wait_for(awaitable, timeout=timeout)
+    except asyncio.TimeoutError:
+        _log.warning("monitor: %s timed out after %ss", what, timeout)
+        return default
 
 
 def _snippet(text: str, limit: int = _SNIPPET_MAX) -> str:
@@ -181,18 +226,22 @@ def completion_embed(
 async def _fetch_title(
         client: OpencodeClient, sid: str, directory: str | None = None
 ) -> str:
-    """Best-effort session title for embed headers (never raises).
+    """Best-effort session title for embed headers (never raises, never hangs).
 
     `directory` routes the GET to the project instance the session was
     seen in — session lookups are instance-scoped, so a bare call would
     miss (or 404) for a sid living in another directory.
     """
     try:
-        session = await client.get_session(sid, directory=directory)
+        session = await asyncio.wait_for(
+            client.get_session(sid, directory=directory), timeout=_AUX_TIMEOUT
+        )
         if isinstance(session, dict):
             title = session.get("title")
             if title:
                 return str(title)
+    except asyncio.TimeoutError:
+        _log.debug("get_session(%s) timed out for monitor title", sid)
     except Exception:  # noqa: BLE001 — title is cosmetic; never block the loop
         _log.debug("get_session(%s) failed for monitor title", sid, exc_info=True)
     return "(unknown)"
@@ -207,9 +256,13 @@ async def _fetch_snippet(
     seen in — message lookups are instance-scoped like sessions.
     """
     try:
-        messages = await client.list_messages(sid, directory=directory)
+        messages = await asyncio.wait_for(
+            client.list_messages(sid, directory=directory), timeout=_AUX_TIMEOUT
+        )
         if isinstance(messages, list):
             return _final_assistant_text(messages)
+    except asyncio.TimeoutError:
+        _log.debug("list_messages(%s) timed out for monitor snippet", sid)
     except Exception:  # noqa: BLE001 — snippet is cosmetic; never block the loop
         _log.debug("list_messages(%s) failed for monitor snippet", sid, exc_info=True)
     return ""
@@ -229,7 +282,16 @@ async def _discover_directories(
     """
     directories: list[str | None] = [None]
     try:
-        projects = await client.list_projects()
+        projects = await asyncio.wait_for(client.list_projects(), _AUX_TIMEOUT)
+    except asyncio.TimeoutError:
+        if not state.projects_warned:
+            _log.warning(
+                "monitor: list_projects timed out after %ss — falling back "
+                "to cwd-only polling for this cycle (this message logs once)",
+                _AUX_TIMEOUT,
+            )
+            state.projects_warned = True
+        return directories
     except Exception as e:  # noqa: BLE001 — discovery must not kill the loop
         if not state.projects_warned:
             _log.warning(
@@ -370,21 +432,34 @@ async def _poll_once(bot, client: OpencodeClient, state: _MonitorState) -> None:
     else:
         directories: list[str | None] = [None]
 
-    # --- status maps: one GET per directory, unioned ---
+    # --- status maps: one bounded GET per directory, unioned ---
+    # `_FETCH_FAILED` (the sentinel) marks a TIMED-OUT poll so completion
+    # detection can distinguish "no sessions running" from "this
+    # directory's status is unknown this cycle" — the latter must never
+    # read as a completion for sessions last seen there.
     status_results = await asyncio.gather(
         *(
-            client.get_session_status(directory=d)
+            _bounded(
+                client.get_session_status(directory=d),
+                _FETCH_TIMEOUT,
+                f"get_session_status(directory={d!r})",
+                _FETCH_FAILED,
+            )
             for d in directories
         ),
         return_exceptions=True,
     )
     status_map: dict = {}
+    ok_status_dirs: set[str | None] = set()
     for d, result in zip(directories, status_results):
         if isinstance(result, BaseException):
             _log.warning(
                 "monitor: get_session_status(directory=%r) failed: %r", d, result
             )
             continue
+        if result is _FETCH_FAILED:
+            continue
+        ok_status_dirs.add(d)
         for sid, status in (result or {}).items():
             # First poll to report a sid wins the directory mapping (the
             # cwd poll and the true directory's poll both see cwd sids —
@@ -393,13 +468,29 @@ async def _poll_once(bot, client: OpencodeClient, state: _MonitorState) -> None:
                 state.sid_directory[sid] = d
             status_map.setdefault(sid, status)
 
-    # --- question + permission requests: one GET per directory ---
+    # --- question + permission requests: one bounded GET per directory ---
     question_results = await asyncio.gather(
-        *(client.list_questions(directory=d) for d in directories),
+        *(
+            _bounded(
+                client.list_questions(directory=d),
+                _FETCH_TIMEOUT,
+                f"list_questions(directory={d!r})",
+                _FETCH_FAILED,
+            )
+            for d in directories
+        ),
         return_exceptions=True,
     )
     permission_results = await asyncio.gather(
-        *(client.list_permissions(directory=d) for d in directories),
+        *(
+            _bounded(
+                client.list_permissions(directory=d),
+                _FETCH_TIMEOUT,
+                f"list_permissions(directory={d!r})",
+                _FETCH_FAILED,
+            )
+            for d in directories
+        ),
         return_exceptions=True,
     )
     questions: list = []
@@ -409,6 +500,8 @@ async def _poll_once(bot, client: OpencodeClient, state: _MonitorState) -> None:
                 "monitor: list_questions(directory=%r) failed: %r", d, result
             )
             continue
+        if result is _FETCH_FAILED:
+            continue
         for req in result or []:
             questions.append((d, req))
     permissions: list = []
@@ -417,6 +510,8 @@ async def _poll_once(bot, client: OpencodeClient, state: _MonitorState) -> None:
             _log.warning(
                 "monitor: list_permissions(directory=%r) failed: %r", d, result
             )
+            continue
+        if result is _FETCH_FAILED:
             continue
         for req in result or []:
             permissions.append((d, req))
@@ -428,6 +523,9 @@ async def _poll_once(bot, client: OpencodeClient, state: _MonitorState) -> None:
     muted = dashboard_state.is_monitor_paused()
 
     # --- question + permission events (new, non-excluded request ids) ---
+    # The request id is marked seen only AFTER a successful Discord send:
+    # a failed/timed-out send leaves it unseen, so the next cycle retries
+    # the notification instead of silently dropping it.
     for d, req in questions:
         if not isinstance(req, dict):
             continue
@@ -435,16 +533,18 @@ async def _poll_once(bot, client: OpencodeClient, state: _MonitorState) -> None:
         sid = req.get("sessionID", "")
         if not rid or rid in state.seen_questions or sid in excluded:
             continue
-        state.seen_questions.add(rid)
         if muted:
+            state.seen_questions.add(rid)
             continue
         directory = d if d is not None else state.sid_directory.get(sid)
         title = await _fetch_title(client, sid, directory)
-        await _post(
+        posted = await _post(
             bot,
             state,
             question_embed(title, sid, req, _directory_label(directory)),
         )
+        if posted:
+            state.seen_questions.add(rid)
 
     for d, req in permissions:
         if not isinstance(req, dict):
@@ -453,21 +553,30 @@ async def _poll_once(bot, client: OpencodeClient, state: _MonitorState) -> None:
         sid = req.get("sessionID", "")
         if not rid or rid in state.seen_permissions or sid in excluded:
             continue
-        state.seen_permissions.add(rid)
         if muted:
+            state.seen_permissions.add(rid)
             continue
         directory = d if d is not None else state.sid_directory.get(sid)
         title = await _fetch_title(client, sid, directory)
-        await _post(
+        posted = await _post(
             bot,
             state,
             permission_embed(title, sid, req, _directory_label(directory)),
         )
+        if posted:
+            state.seen_permissions.add(rid)
 
     # --- completion events (tracked busy sessions that left the map) ---
     # A session counts as running when its status entry is "busy" or
     # "retry" (a retrying session is still working). The server removes
     # idle sessions from the map, so a tracked id disappearing = completed.
+    #
+    # FAILURE-AWARE: a bare GET only sees the serve-cwd instance, so a
+    # session's completion can only be claimed by the poll that actually
+    # covers it — its mapped directory (`sid_directory[sid]`), or the cwd
+    # poll for sessions never mapped (cwd-only fallback / cwd instance).
+    # If that poll failed or timed out this cycle, the session is UNKNOWN,
+    # not completed — it stays tracked and completes on a later cycle.
     running = {
         sid
         for sid, status in status_map.items()
@@ -478,20 +587,32 @@ async def _poll_once(bot, client: OpencodeClient, state: _MonitorState) -> None:
             _log.info("monitor: tracking busy session %s", sid)
         state.busy.add(sid)
     for sid in list(state.busy):
-        if sid not in running:
-            # Left the map (idle) — completed. Excluded sessions are
-            # dropped from tracking without a notification.
-            state.busy.discard(sid)
-            if sid in excluded or muted:
-                continue
-            directory = state.sid_directory.get(sid)
-            title = await _fetch_title(client, sid, directory)
-            snippet = await _fetch_snippet(client, sid, directory)
-            await _post(
-                bot,
-                state,
-                completion_embed(title, sid, snippet, _directory_label(directory)),
-            )
+        if sid in running:
+            continue
+        # The covering poll must have reported this cycle to claim a
+        # completion. `None` (cwd poll) is the cover for sessions with no
+        # directory mapping; a mapped session is covered by its directory.
+        home = state.sid_directory.get(sid)
+        if home not in ok_status_dirs:
+            # Unknown this cycle — keep tracking; try again next cycle.
+            continue
+        # Left the map (idle) — completed. Excluded sessions are dropped
+        # from tracking without a notification.
+        state.busy.discard(sid)
+        if sid in excluded or muted:
+            continue
+        directory = state.sid_directory.get(sid)
+        title = await _fetch_title(client, sid, directory)
+        snippet = await _fetch_snippet(client, sid, directory)
+        posted = await _post(
+            bot,
+            state,
+            completion_embed(title, sid, snippet, _directory_label(directory)),
+        )
+        if not posted:
+            # Send failed — re-track so the completion embed retries next
+            # cycle instead of being lost.
+            state.busy.add(sid)
 
 
 async def run_monitor(bot) -> None:

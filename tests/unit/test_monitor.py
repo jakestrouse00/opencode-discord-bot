@@ -65,6 +65,22 @@ class FakeRouter:
         self._map = dict(bindings)
 
 
+class FlakyMonitorChannel(FakeMonitorChannel):
+    """Channel whose first N sends raise (simulates a Discord/network
+    failure) — the monitor must retry the notification on a later cycle
+    instead of silently dropping it."""
+
+    def __init__(self, fail_first: int = 1):
+        super().__init__()
+        self.fail_first = fail_first
+
+    async def send(self, content=None, *, embed=None, **kw):
+        if self.fail_first > 0:
+            self.fail_first -= 1
+            raise RuntimeError("discord send failed")
+        await super().send(content, embed=embed, **kw)
+
+
 # ---------------------------------------------------------------------------
 # Embed builders (pure functions — no loop, no bot)
 # ---------------------------------------------------------------------------
@@ -310,6 +326,69 @@ class TestPollLoop:
         embeds = [e for _, e in channel.sent if e is not None]
         assert len(embeds) == 1
         assert "Recovered." in embeds[0].description
+
+    async def test_failed_status_poll_does_not_claim_completion(self):
+        """A failed (raising) status poll for a session's directory must
+        NOT read as "session completed" — the session stays tracked and
+        the completion embed fires only on a later cycle where the
+        covering poll actually reported."""
+        client = ScriptedOpencodeClient()
+        channel = FakeMonitorChannel()
+        bot = FakeMonitorBot(client, channel)
+        # Cycle 1: busy seen via the cwd poll. Cycle 2: the cwd poll
+        # RAISES (status unknown). Cycle 3+: the poll reports an empty
+        # map (the session genuinely completed) — only then does the
+        # completion embed fire.
+        client.script("get_session_status", {"sess-x": {"type": "busy"}})
+        client.script_exc("get_session_status", RuntimeError("boom"))
+        client.script("get_session_status", {}, {}, {})
+        client.script("get_session", {"id": "sess-x", "title": "Stall task"})
+        client.script("list_messages", [assistant_message("Finally done.")])
+        await _run_cycles(bot, cycles=4)
+        embeds = [e for _, e in channel.sent if e is not None]
+        assert len(embeds) == 1
+        assert "completed" in embeds[0].title.lower()
+        assert "Finally done." in embeds[0].description
+
+    async def test_failed_send_retries_question_next_cycle(self):
+        """A failed Discord send must not consume the request id — the
+        question embed retries on the next cycle (previously the id was
+        marked seen before the send, silently dropping the notification)."""
+        client = ScriptedOpencodeClient()
+        channel = FlakyMonitorChannel(fail_first=1)
+        bot = FakeMonitorBot(client, channel)
+        q = question_request(rid="q-1", sid="sess-retry")
+        # Question persists across cycles (still pending on the server).
+        client.script("list_questions", [q], [q], [q])
+        client.script(
+            "get_session", {"id": "sess-retry", "title": "Retry"},
+            {"id": "sess-retry", "title": "Retry"},
+        )
+        await _run_cycles(bot, cycles=3)
+        embeds = [e for _, e in channel.sent if e is not None]
+        assert len(embeds) == 1
+        assert "Retry" in embeds[0].title
+
+    async def test_failed_send_retries_completion_next_cycle(self):
+        """A failed send for a completion embed must re-track the session
+        so the embed retries next cycle instead of being lost."""
+        client = ScriptedOpencodeClient()
+        channel = FlakyMonitorChannel(fail_first=1)
+        bot = FakeMonitorBot(client, channel)
+        client.script(
+            "get_session_status", {"sess-c": {"type": "busy"}}, {}, {}, {}
+        )
+        client.script(
+            "get_session", {"id": "sess-c", "title": "Lost task"},
+            {"id": "sess-c", "title": "Lost task"},
+        )
+        client.script(
+            "list_messages", [assistant_message("Saved.")], [assistant_message("Saved.")]
+        )
+        await _run_cycles(bot, cycles=4)
+        embeds = [e for _, e in channel.sent if e is not None]
+        assert len(embeds) == 1
+        assert "Saved." in embeds[0].description
 
 
 # ---------------------------------------------------------------------------

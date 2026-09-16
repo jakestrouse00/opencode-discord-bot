@@ -567,7 +567,23 @@ root: `Dockerfile`, `fly.toml`, `fly.env.example`, `start.sh`,
   basename (`session <sid> · <basename>`) via a naive `/`+`\` split (the
   Fly container is Linux; Windows worktrees wouldn't split under
   `os.path.basename`). `monitor_all_directories=False` restores cwd-only
-  polling without a redeploy. Polls the same three documented GETs the button
+  polling without a redeploy. **Bounded fetches:** every fan-out poll and
+  aux fetch (project discovery, title, snippet) is wrapped in a hard
+  `asyncio.wait_for` bound (`monitor._FETCH_TIMEOUT` 10s per directory
+  poll, `_AUX_TIMEOUT` 5s for aux fetches) — the shared `OpencodeClient`
+  allows a 60s read timeout x 3 GET retries, so an unbounded gather once
+  stalled whole poll cycles for minutes when the server/tunnel hiccuped,
+  clumping events into one late batch. A timed-out poll returns a
+  `_FETCH_FAILED` sentinel that is skipped for the cycle. **Failure-aware
+  completion:** a completion is claimed only when the session's covering
+  poll (its mapped directory, or the cwd poll for unmapped sessions) is
+  KNOWN to have succeeded that cycle (`ok_status_dirs`) — a failed/
+  timed-out status poll means "unknown", not "completed", so a tunnel
+  blip can no longer fire false "session completed" embeds or strand
+  never-notified completions. **Retry-on-send-failure:** request ids are
+  marked seen and busy completions un-tracked only AFTER a successful
+  Discord send — a failed send retries next cycle instead of silently
+  dropping the notification. Polls the same three documented GETs the button
   UI uses (`get_session_status` + `list_questions` + `list_permissions`,
   each gathered per directory with `return_exceptions=True`) at
   `config.monitor_poll_interval_seconds` (default 10s, read per-cycle so
