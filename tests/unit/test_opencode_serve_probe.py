@@ -63,13 +63,21 @@ def test_probe_rejects_html_200(monkeypatch):
 
 
 def test_probe_accepts_opencode_json_200(monkeypatch):
-    """A 200 + opencode health JSON (``{healthy, version}``) IS healthy."""
+    """A 200 + OpenAPI spec JSON (``{openapi, info}``) IS healthy.
+
+    v2 has no JSON health route — the probe hits ``GET /openapi.json`` and
+    validates the OpenAPI shape.
+    """
     serve = _make_serve()
     monkeypatch.setattr(
         urllib.request,
         "urlopen",
         lambda req, timeout=None: _FakeResponse(
-            200, json.dumps({"healthy": True, "version": "1.18.10"}).encode()
+            200,
+            json.dumps(
+                {"openapi": "3.1.0", "info": {"title": "opencode HttpApi",
+                                              "version": "2.0.15"}}
+            ).encode(),
         ),
     )
     assert serve._probe_healthy() is True
@@ -105,8 +113,8 @@ def test_probe_rejects_non_json_200(monkeypatch):
 
 
 def test_probe_rejects_json_without_health_keys(monkeypatch):
-    """A 200 with valid JSON but no ``healthy``/``version`` keys is rejected
-    — it's some other JSON server, not opencode."""
+    """A 200 with valid JSON but no ``openapi``/``info+paths`` keys is
+    rejected — it's some other JSON server, not opencode."""
     serve = _make_serve()
     monkeypatch.setattr(
         urllib.request,
@@ -119,13 +127,15 @@ def test_probe_rejects_json_without_health_keys(monkeypatch):
 
 
 def test_wait_healthy_accepts_opencode_json(monkeypatch):
-    """``_wait_healthy`` returns True once a 200 + opencode JSON is seen."""
+    """``_wait_healthy`` returns True once a 200 + OpenAPI spec JSON is seen."""
     serve = _make_serve()
     monkeypatch.setattr(
         urllib.request,
         "urlopen",
         lambda req, timeout=None: _FakeResponse(
-            200, json.dumps({"healthy": True}).encode()
+            200,
+            json.dumps({"openapi": "3.1.0", "info": {"title": "t", "version": "1"},
+                        "paths": {}}).encode(),
         ),
     )
     assert serve._wait_healthy(timeout=1.0) is True

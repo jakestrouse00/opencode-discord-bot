@@ -219,12 +219,20 @@ def permission_block(request: dict) -> str:
     return "\n".join(out)
 
 
-def _fmt_options(options: list[dict], limit: int = 10) -> str:
-    """Render an option list as a numbered text block for the message body."""
+def _fmt_options(options: list, limit: int = 10) -> str:
+    """Render an option list as a numbered text block for the message body.
+
+    v2 form field options are ``{label, description?}`` objects (or bare
+    strings in the v1 shape); both are handled.
+    """
     lines = []
     for i, opt in enumerate(options[:limit], 1):
-        label = opt.get("label", "?")
-        desc = opt.get("description", "")
+        if isinstance(opt, dict):
+            label = opt.get("label", "?")
+            desc = opt.get("description", "")
+        else:
+            label = str(opt)
+            desc = ""
         lines.append(f"**{i}.** {label}" + (f" — {desc}" if desc else ""))
     if len(options) > limit:
         lines.append(f"_(+{len(options) - limit} more, see menu)_")

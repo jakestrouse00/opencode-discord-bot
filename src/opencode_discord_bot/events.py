@@ -1,27 +1,30 @@
 """Status-polling bridge: relays opencode session progress to Discord.
 
-`poll_until_idle` periodically calls `GET /session/status` for a specific
-opencode session, invokes a caller callback on each status change, and
-returns when the session becomes idle (the prompt finished).
+`poll_until_idle` periodically calls `get_session_status` (v2:
+``GET /api/session/active``) for a specific opencode session, invokes a
+caller callback on each status change, and returns when the session becomes
+idle (the prompt finished).
 
 The previous implementation consumed the global opencode SSE stream
-(`GET /event`), but that stream emits v2-native events whose wire format
-(``{id, type, data}`` with the event type in the JSON body, not the SSE
-``event:`` line, which is always ``"message"``) did not match the v1
-``{type, properties}`` shape the old parser expected. The parser silently
-skipped every event, so the idle signal was never observed and the relay
-loop hung forever — the bot sent the prompt but never relayed the
-response. Polling the documented ``/session/status`` endpoint avoids the
-entire class of wire-format bugs.
+(``GET /event``), but its wire format did not match the parser's expected
+shape — the parser silently skipped every event, so the idle signal was
+never observed and the relay loop hung forever. Polling avoids the entire
+class of wire-format bugs. (The client now speaks the v2 SSE format too,
+but polling remains the bot's authoritative idle signal.)
 
-**Fire-and-forget race fix:** ``POST /session/{id}/prompt_async`` returns
-``204 No Content`` immediately and forks the prompt work
-(``Effect.forkIn(..., { startImmediately: true })`` in the server handler).
-There is a window between the 204 response and the forked effect's first
-``status.set(sessionID, { type: "busy" })`` during which the session is
-absent from the in-memory status map. A missing entry in the status map
-*normally* means idle (the server deletes idle sessions from the map), but
-in that window it means "the fork hasn't started yet." Without a guard,
+**v2 idle semantics:** ``GET /api/session/active`` returns
+``{"data": {sessionID: {"type": "running"}}}`` for sessions with an active
+agent loop; sessions absent from the map are idle. The client projects this
+into the v1 ``{sessionID: {"type": "busy"}}`` shape, so this loop's logic is
+unchanged.
+
+**Dispatch race fix:** the v2 prompt endpoint (``POST
+/api/session/{id}/prompt``) returns immediately with the admitted user
+inbox entry, then schedules the agent loop. There is a window between that
+response and the loop's first ``status.set(sessionID, busy)`` during which
+the session is absent from the active map. A missing entry *normally* means
+idle (v2's active map also only holds running sessions), but in that window
+it means "the scheduled agent loop hasn't started yet." Without a guard,
 ``poll_until_idle``'s first poll (which runs with no preceding sleep) would
 see the missing entry, treat it as idle, return immediately, and the bot
 would fetch ``list_messages`` before any assistant text existed — producing
@@ -42,8 +45,8 @@ from opencode_discord_bot.opencode_client import OpencodeClient
 
 _log = logging.getLogger("bot.events")
 
-# A session status dict from `GET /session/status`, e.g.
-# ``{"type": "busy"}`` or ``{"type": "retry", "attempt": 1, ...}``.
+# A session status dict from `get_session_status` (v2 active-map projected
+# to the v1 shape), e.g. ``{"type": "busy"}``.
 SessionStatus = dict
 
 OnStatus = Callable[[SessionStatus], Awaitable[None]]
@@ -76,7 +79,7 @@ async def poll_until_idle(
         interval: float = 2.0,
         timeout: float | None = None,
 ) -> SessionStatus:
-    """Poll ``GET /session/status`` for ``session_id`` until it is idle.
+    """Poll ``get_session_status`` for ``session_id`` until it is idle.
 
     The loop:
     1. Fetches the session-status map (``{sessionID: SessionStatus}``).

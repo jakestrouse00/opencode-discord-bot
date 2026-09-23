@@ -71,10 +71,14 @@ _REPO_ROOT = (
 def _resolve_opencode_argv() -> list[str] | None:
     """Return the argv list to launch `opencode`, or None if unavailable.
 
-    Prefers a bare `opencode` on PATH (choco/scoop/binary install). Falls back
-    to `npx -y -p opencode-ai opencode` so a user with only Node installed can
-    still run (npx downloads the package on first use). Returns None if neither
-    `opencode` nor `npx` is resolvable on PATH.
+    Prefers the desktop app's staged v2 CLI (the ``%APPDATA%`` path
+    ``ai.opencode.desktop/cli/<version>/opencode-cli.exe``, newest version
+    wins) — opencode 2.x is not distributed via npm; it ships inside the
+    desktop app, and this client speaks the v2 API, so a v2 CLI is required.
+    Falls back to a bare `opencode` on PATH (choco/scoop/binary install),
+    then `npx -y -p opencode-ai opencode` so a v1-only user can still run
+    (the client's calls will 404 against a v1 server, surfaced by the
+    callers). Returns None if nothing is resolvable.
 
     Windows quirk: `npx` and `opencode` typically install as `.CMD` batch
     wrappers. `subprocess.Popen` with a list (no shell) calls `CreateProcess`
@@ -82,6 +86,17 @@ def _resolve_opencode_argv() -> list[str] | None:
     So when the resolved binary is a `.cmd`/`.bat`, we prepend ``cmd /c`` and
     use the full resolved path. `.exe` binaries are launched directly.
     """
+    v2_stage_dir = Path(os.environ.get("APPDATA", "")) / "ai.opencode.desktop" / "cli"
+    if v2_stage_dir.is_dir():
+        candidates = sorted(
+            (d for d in v2_stage_dir.iterdir() if d.is_dir()),
+            key=lambda d: d.name,
+            reverse=True,
+        )
+        for d in candidates:
+            exe = d / "opencode-cli.exe"
+            if exe.is_file():
+                return [str(exe)]
     opencode_path = shutil.which("opencode")
     if opencode_path:
         return _wrap_if_batch(opencode_path)
@@ -387,18 +402,19 @@ class OpencodeServe:
 
     @staticmethod
     def _is_opencode_health_response(r) -> bool:
-        """True if `r` is a 200 + opencode-shaped JSON health body.
+        """True if `r` is a 200 + opencode-shaped JSON body.
 
-        opencode's ``GET /global/health`` returns a JSON object containing
-        at least a ``healthy`` (and usually ``version``) key. Validating the
-        body — not just the status code — is load-bearing: when the
-        `opencode-remote-gui` (Flet/FastAPI) co-hosts on the same port it
-        serves a 200 + HTML catch-all on every path, including
-        ``/global/health``. A status-only check false-positives on the GUI's
-        HTML and makes the bot "reuse" the GUI as opencode serve, after
-        which every API call (``POST /session``, etc.) 405s. The JSON parse
-        + key check rejects HTML / non-JSON / wrong-shape responses so the
-        bot falls through to spawning the real server instead.
+        v2 has no JSON health route; the probe hits ``GET /openapi.json``,
+        which returns the OpenAPI spec (``{"openapi": ..., "info": {title,
+        version}, ...}``). Validating the body — not just the status code —
+        is load-bearing: when the `opencode-remote-gui` (Flet/FastAPI)
+        co-hosts on the same port it serves a 200 + HTML catch-all on every
+        path, including ``/openapi.json``. A status-only check
+        false-positives on the GUI's HTML and makes the bot "reuse" the GUI
+        as opencode serve, after which every API call 404s. The JSON parse
+        + ``openapi``/``info`` key check rejects HTML / non-JSON /
+        wrong-shape responses so the bot falls through to spawning the real
+        server instead.
         """
         try:
             if r.status != 200:
@@ -406,19 +422,24 @@ class OpencodeServe:
             body = json.loads(r.read(2048))
         except (ValueError, OSError):
             return False
-        return isinstance(body, dict) and ("healthy" in body or "version" in body)
+        if not isinstance(body, dict):
+            return False
+        return "openapi" in body or ("info" in body and "paths" in body)
 
     def _probe_healthy(self) -> bool:
-        """One-shot authed GET /global/health. True if 200 + opencode body.
+        """One-shot authed GET /openapi.json. True if 200 + opencode body.
 
-        Used as a pre-flight to detect an already-running server at the target
-        URL so we reuse it instead of spawning a duplicate that can't bind.
-        Validates the response body is opencode's JSON health shape (not just
-        a 200) — see ``_is_opencode_health_response`` for why. Never raises.
+        v2 has no JSON health route — the OpenAPI spec endpoint is
+        auth-gated, so a validated 200 proves liveness AND a correct
+        password. Used as a pre-flight to detect an already-running server
+        at the target URL so we reuse it instead of spawning a duplicate
+        that can't bind. Validates the response body is opencode's OpenAPI
+        shape (not just a 200) — see ``_is_opencode_health_response`` for
+        why. Never raises.
         """
         try:
             req = urllib.request.Request(
-                f"{self.url}/global/health",
+                f"{self.url}/openapi.json",
                 headers={"Authorization": self._auth_header()},
             )
             with urllib.request.urlopen(req, timeout=2.0) as r:
@@ -427,7 +448,7 @@ class OpencodeServe:
             return False
 
     def _wait_healthy(self, timeout: float) -> bool:
-        """Poll GET /global/health until 200 + opencode body or timeout.
+        """Poll GET /openapi.json until 200 + opencode body or timeout.
 
         Sends basic auth (opencode:<password>) because `opencode serve`
         returns 401 on every endpoint when OPENCODE_SERVER_PASSWORD is set —
@@ -437,7 +458,7 @@ class OpencodeServe:
         co-hosted on the same port returning 200 + HTML).
         """
         deadline = time.monotonic() + max(0.0, timeout)
-        url = f"{self.url}/global/health"
+        url = f"{self.url}/openapi.json"
         auth_header = self._auth_header()
         while time.monotonic() < deadline:
             if self._proc is not None and self._proc.poll() is not None:

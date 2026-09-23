@@ -1,25 +1,29 @@
-"""Discord UI surface for opencode's blocking ``question`` and ``permission`` requests.
+"""Discord UI surface for opencode's blocking ``form`` and ``permission`` requests.
 
-The opencode server parks an agent turn on a deferred whenever the agent calls
-the ``question`` tool (``packages/opencode/src/tool/question.ts``) or a tool
-hits a permission rule whose action is ``"ask"`` (``packages/opencode/src/permission/index.ts``).
-Session status stays ``"busy"`` the whole time — there is no "waiting for input"
-status — so the bot's ``poll_until_idle`` loop can't tell a blocked turn from a
-running one. This module polls ``GET /question`` and ``GET /permission`` for
-the session being driven, renders each pending request as Discord buttons /
+The opencode server parks an agent turn on a deferred whenever a tool hits a
+permission rule whose action is ``"ask"``, or on a pending **form** (the v2
+replacement for the v1 ``question`` tool). Session status stays ``busy`` the
+whole time — there is no "waiting for input" status — so the bot's
+``poll_until_idle`` loop can't tell a blocked turn from a running one. This
+module polls ``GET /api/form`` and ``GET /api/permission/request`` for the
+session being driven, renders each pending request as Discord buttons /
 select menus, and POSTs the user's choice back to the matching REST endpoint
 so the deferred resolves and the agent turn resumes.
 
-Wire format reference (``packages/schema/src/v1/question.ts`` and
-``.../v1/permission.ts``):
+Wire format (v2, per the 2.0.15 server's ``/openapi.json``). **The client
+(``opencode_client.list_questions``) projects each v2 ``Form.Info`` into
+the v1 question shape below**, so this module's renderers are unchanged:
 
-  Question.Request = { id, sessionID, questions: Question.Info[], tool? }
-  Question.Info    = { question, header, options: Option[], multiple?, custom? }
-  Question.Option  = { label, description }
-  Question answer  = string[][]  (one array of selected labels per question, in order)
+  Question.Request (projected Form.Info) = { id, sessionID, title?,
+                                             questions: [{question, options, multiple}],
+                                             _v2_form: <raw Form.Info> }
+  Question answer  = string[][]  (one array of selected labels per question, in order;
+                                  reverse-mapped to the v2 single ``Form.Value`` answer)
 
-  Permission.Request = { id, sessionID, permission, patterns, metadata, always, tool? }
-  Permission reply   = { reply: "once"|"always"|"reject", message? }
+  Permission.Request = { id, sessionID, action, resources, metadata, message? }
+                       (v1 ``permission``/``patterns`` keys projected from
+                       v2 ``action``/``resources``)
+  Permission reply   = { decision: "once"|"always"|"reject", message? }
 
 Discord component limits that shape this code:
   - Max 5 buttons per action row, 5 rows per View (25 buttons total).
@@ -552,7 +556,7 @@ async def poll_pending_requests(
         stop_event: asyncio.Event,
         voice_session: VoiceSession | None = None,
 ) -> None:
-    """Poll ``GET /question`` + ``GET /permission`` and surface matching requests.
+    """Poll ``list_questions`` (v2 /api/form) + ``list_permissions`` and surface matching requests.
 
     Runs concurrently with ``poll_until_idle`` inside ``_drive_session``. Each
     iteration fetches both lists, filters to entries whose ``sessionID`` matches

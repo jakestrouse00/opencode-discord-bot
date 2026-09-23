@@ -1,11 +1,35 @@
-"""Async httpx wrapper over the opencode server REST API.
+"""Async httpx wrapper over the opencode **v2** server REST API (v2.0+).
 
-There is no official Python SDK for the opencode server (the SDK is JS/TS-only
-per https://opencode.ai/docs/sdk), so this module is a thin typed surface over
-the REST endpoints documented at https://opencode.ai/docs/server. All methods
-are async and operate on a single `httpx.AsyncClient` owned for the process
-lifetime; the client is created lazily so importing this module does not open
-any connection.
+opencode 2.x replaced the v1 API surface (`/session`, `/event`, ...) with a
+new one under the ``/api/`` prefix with different routes, request bodies,
+response envelopes, and an SSE stream whose semantic type lives in the JSON
+body under ``type`` with the payload under ``data``. This module is a thin
+typed surface over the v2 endpoints (route names verified against the
+2.0.15 server's ``/openapi.json``).
+
+**v1-shape projection (compatibility layer).** The bot's UI/rendering
+modules (`questions.py`, `bridge_questions.py`, `monitor.py`,
+`text_utils.py`, `events.py`) were written against the v1 client shapes, so
+this client projects v2 responses into v1-compatible shapes:
+
+- Response envelopes (``{"data": ...}`` / ``{"location": ..., "data": ...}``
+  / ``{"data": ..., "cursor": ...}``) are unwrapped.
+- ``list_messages`` returns the v1 ``{"info": ..., "parts": [...]}`` entries
+  (v2's ``Session.Message.*`` shapes are translated: ``content`` parts array
+  → ``parts``; user ``text`` field → a text part; tool ``name`` →
+  ``part["tool"]``; the ``idle`` sentinel messages are dropped).
+- ``send_prompt_async`` keeps the v1 signature (``parts``, ``agent``,
+  ``model``) and maps it onto v2 primitives: per-session agent/model switch
+  (``POST /api/session/{id}/agent`` + ``/model``) then
+  ``POST /api/session/{id}/prompt {text}`` (v2's only prompt endpoint — it
+  always schedules asynchronously).
+- ``list_questions`` projects v2 ``Form.Info`` entries into the v1 question
+  shape (``{id, sessionID, questions: [{question, options, multiple}]}``)
+  so the button UI keeps rendering; ``reply_question`` /
+  ``reject_question`` reverse-map to the v2 form reply/cancel endpoints.
+- ``get_session_status`` projects the v2 ``GET /api/session/active`` map
+  into the v1 ``{sessionID: {"type": "busy"}}`` shape (the v1 server removed
+  idle entries from the map; so does v2's active map).
 
 The server is spawned and torn down by `OpencodeBot` (`on_connect`/`close`)
 via `opencode_discord_bot/opencode_serve.py`; this client just talks to
@@ -20,11 +44,10 @@ See https://opencode.ai/docs/server#authentication.
 
 The SSE stream (`stream_events`) is intentionally NOT retried mid-stream by
 this client — a dropped SSE connection should be re-established by the caller,
-which owns the reconnect/backoff loop. Note: the Discord bot no longer uses
-the SSE stream; it polls `GET /session/status` via `get_session_status` (see
-`opencode_discord_bot.events.poll_until_idle`) because the v2 SSE wire format
-proved fragile to parse. `stream_events` is retained for other potential
-consumers but its v1 parser is known-stale against v2 (see its docstring).
+which owns the reconnect/backoff loop. The bot does NOT use the SSE stream;
+it polls `get_session_status` via `opencode_discord_bot.events.poll_until_idle`.
+`stream_events` speaks the v2 wire format (``{id, type, data}`` frames) and
+yields the v1 consumer shape for external consumers.
 """
 
 from __future__ import annotations
@@ -92,6 +115,184 @@ def _is_5xx_error(err: OpencodeError) -> bool:
 
 class OpencodeError(Exception):
     """Raised on non-2xx responses from the opencode server."""
+
+
+def _unwrap_data(result: Any) -> Any:
+    """Unwrap the v2 ``{"data": ...}`` response envelope."""
+    if isinstance(result, dict) and set(result.keys()) == {"data"}:
+        return result["data"]
+    return result
+
+
+def _unwrap_envelope(result: Any, key: str = "data") -> Any:
+    """Unwrap the v2 list-envelope ``{"location": ..., "data": [...]}``."""
+    if isinstance(result, dict) and key in result:
+        return result[key]
+    return result
+
+
+def _model_ref_obj(model_id: str | None) -> dict | None:
+    """Convert a ``"providerID/modelID"`` config string to the v2
+    ``{"providerID": ..., "id": ...}`` ``Model.Ref`` object.
+
+    Returns ``None`` for empty/None. If the string has no ``/``, logs a
+    warning and returns ``None``. Splits on the FIRST ``/`` only so a model
+    id containing ``/`` is preserved.
+    """
+    if not model_id:
+        return None
+    if "/" not in model_id:
+        _log.warning(
+            "model %r has no '/' — can't build ModelRef {providerID, "
+            "id}; omitting model",
+            model_id,
+        )
+        return None
+    provider_id, _, model_id_part = model_id.partition("/")
+    return {"providerID": provider_id, "id": model_id_part}
+
+
+# --- v2 -> v1 message projection -------------------------------------------
+
+
+def _project_tool_state_to_v1_part(part: dict) -> dict:
+    """Translate one v2 assistant tool-content entry into a v1-style part.
+
+    v2 tool content: ``{type: "tool", id, name, state: {status, input,
+    content?, metadata?, error?}, time}``. v1 parts used
+    ``{"type": "tool", "tool": <name>, "callID": <id>, "state": {...}}``.
+    The v2 ``state`` object already carries ``status`` / ``input`` keys the
+    bot's UI reads, so it's passed through; ``tool`` and ``callID`` are
+    mapped from ``name`` / ``id``.
+    """
+    state = part.get("state") or {}
+    return {
+        "type": "tool",
+        "tool": part.get("name"),
+        "callID": part.get("id"),
+        "state": state,
+    }
+
+
+def _project_content_to_parts(content: Any) -> list[dict]:
+    """Translate the v2 assistant ``content`` array into v1-style parts."""
+    parts: list[dict] = []
+    for item in content if isinstance(content, list) else []:
+        if not isinstance(item, dict):
+            continue
+        ctype = item.get("type")
+        if ctype == "text":
+            parts.append({"type": "text", "text": item.get("text", "")})
+        elif ctype == "reasoning":
+            parts.append({"type": "reasoning", "text": item.get("text", "")})
+        elif ctype == "tool":
+            parts.append(_project_tool_state_to_v1_part(item))
+        else:
+            # Unknown content type: pass through with its v2 shape so new
+            # payloads surface instead of vanishing.
+            parts.append(item)
+    return parts
+
+
+def _project_message(entry: dict) -> dict | None:
+    """Project one v2 ``Session.Message.*`` into the v1 ``{info, parts}`` shape.
+
+    Returns None for v2-only bookkeeping entries (the ``idle`` sentinel
+    emitted at turn end — v1 consumers don't know it) and agent/model/
+    location "switched" markers.
+    """
+    mtype = entry.get("type")
+    if mtype in {"idle", "agent-switched", "model-switched", "location-switched"}:
+        return None
+    if mtype == "assistant":
+        info = {
+            "id": entry.get("id"),
+            "role": "assistant",
+            "agent": entry.get("agent"),
+            "model": entry.get("model"),
+            "finish": entry.get("finish"),
+            "error": entry.get("error"),
+            "cost": entry.get("cost"),
+            "tokens": entry.get("tokens"),
+            "time": entry.get("time"),
+        }
+        content = entry.get("content") or []
+        return {
+            "info": info,
+            "parts": _project_content_to_parts(
+                content if isinstance(content, list) else []
+            ),
+        }
+    if mtype == "user":
+        info = {"id": entry.get("id"), "role": "user", "time": entry.get("time")}
+        text = entry.get("text", "")
+        return {"info": info, "parts": [{"type": "text", "text": text}]}
+    # synthetic / system / skill / shell / compaction: keep the raw entry as
+    # parts (best-effort text extraction still works via `_extract_text`).
+    info = {
+        "id": entry.get("id"),
+        "role": mtype,
+        "time": entry.get("time"),
+    }
+    parts: list[dict] = []
+    text = entry.get("text")
+    if isinstance(text, str):
+        parts.append({"type": "text", "text": text})
+    return {"info": info, "parts": parts}
+
+
+def _project_form_to_v1_question(form: dict) -> dict:
+    """Project one v2 ``Form.Info`` into the v1 question-request shape.
+
+    v1 shape: ``{id, sessionID, questions: [{question, options, multiple}]}``
+    (one entry per form field). The bot's button UI + the monitor's
+    ``question_block`` render this shape, so the projection keeps them
+    unchanged. Field options in v2 are ``{label, ...}`` objects (or bare
+    strings); both are normalized to the label string.
+    """
+    fields = form.get("fields") or []
+    questions: list[dict] = []
+    for f in fields if isinstance(fields, list) else []:
+        if not isinstance(f, dict):
+            continue
+        raw_options = f.get("options") or []
+        options = [
+            o.get("label") if isinstance(o, dict) else o for o in raw_options
+        ]
+        questions.append(
+            {
+                "question": f.get("title") or f.get("key", ""),
+                "options": options,
+                "multiple": f.get("type") == "multiselect",
+            }
+        )
+    return {
+        "id": form.get("id"),
+        "sessionID": form.get("sessionID"),
+        # The form's own title, for renderers that want a headline.
+        "title": form.get("title"),
+        "questions": questions,
+        # Keep the raw v2 shape under a namespaced key for callers that
+        # need the fields (e.g. free-text forms with no options).
+        "_v2_form": form,
+    }
+
+
+def _project_v1_question_to_v2(form: dict, answers: list[list[str]]) -> Any:
+    """Build the v2 ``Form.Reply`` answer from a v1 answers array.
+
+    The v1 ``question`` API answered ``list[list[str]]`` (one selection
+    array per question); v2 forms are single-field with a scalar
+    ``Form.Value``, so the first selection of the first array is sent
+    (``"a"`` for ``[["a", "b"]]``). Multiselect answers are sent as the
+    string array.
+    """
+    fields = (form.get("fields") or []) if isinstance(form, dict) else []
+    if fields and isinstance(fields[0], dict) and fields[0].get("type") == "multiselect":
+        first = answers[0] if answers else []
+        return [str(x) for x in first]
+    first = answers[0] if answers else []
+    return first[0] if first else ""
 
 
 class OpencodeClient:
@@ -207,113 +408,161 @@ class OpencodeClient:
     # --- global ---
 
     async def health(self) -> dict:
-        """GET /global/health — `{ healthy, version }`."""
-        return await self._request("GET", "/global/health")
+        """Liveness probe (v2-shape projected to the v1 call shape).
+
+        v2 exposes no dedicated JSON health endpoint — the OpenAPI spec
+        (``GET /openapi.json``, 200 with auth) doubles as the probe.
+        Returns ``{"healthy": True, "version": <spec version>}``.
+        """
+        spec = await self._request("GET", "/openapi.json")
+        info: dict = {}
+        if isinstance(spec, dict):
+            info = {"version": (spec.get("info") or {}).get("version")}
+        return {"healthy": True, **info}
 
     # --- sessions ---
 
     async def list_sessions(
             self, *, directory: str | None = None
     ) -> list[dict]:
-        """GET /session — all sessions."""
-        result = await self._request("GET", "/session", directory=directory)
-        return result if isinstance(result, list) else []
+        """GET /api/session — all sessions (newest-first), ``{"data": [...]}``."""
+        kw: dict[str, Any] = {}
+        if directory is not None:
+            kw["params"] = {"directory": directory}
+        result = await self._request("GET", "/api/session", **kw)
+        data = _unwrap_envelope(result)
+        return data if isinstance(data, list) else []
 
     async def create_session(
             self, title: str | None = None, *, directory: str | None = None
     ) -> dict:
-        """POST /session — body `{ title? }`, returns the new session."""
+        """POST /api/session — body `{ title? }`, returns the new session."""
         body: dict = {}
         if title:
             body["title"] = title
-        return await self._request("POST", "/session", json=body, directory=directory)
+        result = await self._request(
+            "POST", "/api/session", json=body, directory=directory
+        )
+        return _unwrap_data(result) or {}
 
     async def get_session(
             self, sid: str, *, directory: str | None = None
     ) -> dict:
-        """GET /session/{id} — session details."""
-        return await self._request("GET", f"/session/{sid}", directory=directory)
+        """GET /api/session/{id} — session details (``{"data": Session}``)."""
+        result = await self._request(
+            "GET", f"/api/session/{sid}", directory=directory
+        )
+        return _unwrap_data(result) or {}
 
     async def delete_session(
             self, sid: str, *, directory: str | None = None
     ) -> bool:
-        """DELETE /session/{id} — returns bool."""
-        return bool(
-            await self._request("DELETE", f"/session/{sid}", directory=directory)
+        """DELETE /api/session/{id} — 204/200 on success."""
+        await self._request(
+            "DELETE", f"/api/session/{sid}", directory=directory
         )
+        return True
 
     async def abort_session(
             self, sid: str, *, directory: str | None = None
     ) -> bool:
-        """POST /session/{id}/abort — abort a running session, returns bool."""
-        return bool(
-            await self._request("POST", f"/session/{sid}/abort", directory=directory)
+        """POST /api/session/{id}/interrupt — abort a running session.
+
+        Returns ``interrupted`` from the response (True when an active
+        execution was interrupted, False for the idle no-op).
+        """
+        result = await self._request(
+            "POST", f"/api/session/{sid}/interrupt", directory=directory
         )
+        if isinstance(result, dict):
+            return bool(result.get("interrupted", True))
+        # 204 (no body) also means the interrupt was processed.
+        return True
 
     async def revert_session(
             self, sid: str, message_id: str, *, directory: str | None = None
     ) -> dict:
-        """POST /session/{id}/revert — revert to a user message, returns session.
+        """Stage + commit a revert to a user message (v2 two-step).
 
-        Body ``{"messageID": message_id}`` reverts the session to before the
-        given user message, undoing its file changes and removing all
-        subsequent messages (server-side, via ``SessionRevert.revert``). The
-        server's next ``prompt`` handler auto-cleans the reverted state
-        (``packages/opencode/src/session/prompt.ts`` ``revert.cleanup``), so no
-        separate "commit" step is needed — just revert then send the new
-        prompt. Requires the session to NOT be busy (``assertNotBusy`` in
-        ``revert.ts``); a busy session raises ``OpencodeError`` (HTTP 400
-        ``SessionBusyError``), so callers should abort + wait first.
+        v2 splits the v1 ``revert`` into stage (``POST .../revert/stage``
+        with ``{"messageID"}``) + commit (``POST .../revert``). Issuing both
+        back-to-back preserves the v1 one-shot semantics. Requires the
+        session to NOT be busy (v2 409s on a busy session), so callers
+        should abort + wait first.
         """
-        return await self._request(
+        await self._request(
             "POST",
-            f"/session/{sid}/revert",
+            f"/api/session/{sid}/revert/stage",
             json={"messageID": message_id},
             directory=directory,
         )
+        result = await self._request(
+            "POST", f"/api/session/{sid}/revert", directory=directory
+        )
+        return _unwrap_data(result) or {}
 
     async def get_session_status(
             self, *, directory: str | None = None
     ) -> dict[str, dict]:
-        """GET /session/status — ``{ sessionID: SessionStatus }``.
+        """GET /api/session/active — running-session map (v1 shape projected).
 
-        Each value is a ``SessionStatus`` object whose ``type`` is one of
-        ``"idle"`` | ``"busy"`` | ``"retry"``. A missing entry for a session id
-        means that session is idle (the server removes idle entries from the
-        status map). See ``packages/schema/src/session-status-event.ts`` and
-        ``packages/opencode/src/server/routes/instance/httpapi/groups/session.ts``.
+        v2 has no ``/session/status``; ``/api/session/active`` returns
+        ``{"data": {sessionID: {"type": "running"}}}`` for sessions with an
+        active agent loop — sessions absent from the map are idle. The v1
+        shape (``{sessionID: {"type": "busy"|"idle"|"retry", ...}}``) is
+        projected: present → ``{"type": "busy"}``; absent ids are idle (the
+        v1 server also removed idle entries from the map, so the callers'
+        missing-entry-is-idle logic is unchanged).
 
-        ``directory`` routes the request to that project instance (the
-        status map is instance-scoped on multi-instance servers).
+        ``directory`` routes the request to that project instance.
         """
         result = await self._request(
-            "GET", "/session/status", directory=directory
+            "GET", "/api/session/active", directory=directory
         )
-        return result if isinstance(result, dict) else {}
+        data = _unwrap_data(result)
+        if not isinstance(data, dict):
+            return {}
+        # Project v2 {"type": "running"} → the v1 {"type": "busy"} shape
+        # (poll_until_idle's saw_busy check keys on "busy").
+        return {sid: {"type": "busy"} for sid in data}
 
     async def list_projects(self) -> list[dict]:
-        """GET /project — the server's known project instances.
+        """GET /api/project — the server's known project instances.
 
-        Each entry is a ``Project`` (``{ worktree, vcs?, ... }``) per
-        ``packages/schema/src/v1/project.ts``. The session monitor uses the
-        ``worktree`` values as the directory fan-out for its per-instance
-        polls (question/permission/status maps are instance-scoped).
+        The session monitor uses the worktree/directory values as the
+        directory fan-out for its per-instance polls.
         """
-        result = await self._request("GET", "/project")
-        return result if isinstance(result, list) else []
+        result = await self._request("GET", "/api/project")
+        data = _unwrap_data(result)
+        return data if isinstance(data, list) else []
 
     # --- messages ---
 
     async def list_messages(
             self, sid: str, limit: int | None = None, *, directory: str | None = None
     ) -> list[dict]:
-        """GET /session/{id}/message — `{ info, parts }[]`."""
+        """GET /api/session/{id}/message — projected `{ info, parts }[]`.
+
+        v2 returns a paginated ``{"data": [...], "cursor": {...}}`` envelope
+        of ``Session.Message.*`` entries; this method unwraps the envelope,
+        projects each entry to the v1 ``{info, parts}`` shape, and drops the
+        v2-only ``idle`` sentinel entries.
+        """
         params: dict = {}
         if limit is not None:
             params["limit"] = limit
-        return await self._request(
-            "GET", f"/session/{sid}/message", params=params, directory=directory
+        result = await self._request(
+            "GET", f"/api/session/{sid}/message", params=params, directory=directory
         )
+        data = _unwrap_envelope(result)
+        out: list[dict] = []
+        for entry in data if isinstance(data, list) else []:
+            if not isinstance(entry, dict):
+                continue
+            projected = _project_message(entry)
+            if projected is not None:
+                out.append(projected)
+        return out
 
     def _resolve_model(self, agent: str | None) -> str | None:
         """Pick the model to send for a prompt, based on the agent + config.
@@ -332,11 +581,10 @@ class OpencodeClient:
 
         The returned string is NOT sent on the wire as-is: ``send_message``
         and ``send_prompt_async`` pass it through ``_model_ref`` to build the
-        ``{"providerID", "modelID"}`` object the opencode server's
-        ``PromptInput.model`` field requires (a string is rejected with HTTP
-        400 ``Expected object | null, got "..." at ["model"]``). The config
-        format stays as the convenient ``"providerID/modelID"`` string; the
-        split is an internal detail of this client.
+        ``{"providerID", "id"}`` object the v2 ``Model.Ref`` requires (a
+        string is rejected with HTTP 400). The config format stays as the
+        convenient ``"providerID/modelID"`` string; the split is an internal
+        detail of this client.
         """
         if agent == "oc-assistant":
             return config.opencode_assistant_model or None
@@ -344,31 +592,17 @@ class OpencodeClient:
 
     @staticmethod
     def _model_ref(model_id: str | None) -> dict | None:
-        """Convert a ``"providerID/modelID"`` config string to the
-        ``{"providerID": ..., "modelID": ...}`` object the opencode server's
-        ``prompt_async`` / ``message`` endpoints require (the server's
-        ``PromptInput.model`` field is ``optional(ModelRef)`` — an object or
-        absent — NOT a string).
+        """Convert a ``"providerID/modelID"`` config string to the v2
+        ``{"providerID": ..., "id": ...}`` ``Model.Ref`` object.
 
         Returns ``None`` for empty/None so the caller omits the key entirely
-        and the server falls back to the agent's frontmatter ``model:`` field.
-        If the string has no ``/``, logs a warning and returns ``None`` (a
-        valid ``ModelRef`` needs both parts; falling back to the agent's
-        frontmatter model is safer than sending a malformed object that 400s).
-        Splits on the FIRST ``/`` only so a model id containing ``/`` is
-        preserved.
+        and the session's default model wins. If the string has no ``/``,
+        logs a warning and returns ``None`` (a valid ``Model.Ref`` needs both
+        parts; falling back to the session default is safer than sending a
+        malformed object that 400s). Splits on the FIRST ``/`` only so a
+        model id containing ``/`` is preserved.
         """
-        if not model_id:
-            return None
-        if "/" not in model_id:
-            _log.warning(
-                "model %r has no '/' — can't build ModelRef {providerID, "
-                "modelID}; omitting model so the agent frontmatter model wins",
-                model_id,
-            )
-            return None
-        provider_id, _, model_id_part = model_id.partition("/")
-        return {"providerID": provider_id, "modelID": model_id_part}
+        return _model_ref_obj(model_id)
 
     async def send_message(
             self,
@@ -379,35 +613,54 @@ class OpencodeClient:
             *,
             directory: str | None = None,
     ) -> dict:
-        """POST /session/{id}/message — synchronous wait for full response.
+        """Synchronous prompt on v2: dispatch → wait → newest assistant turn.
 
         The bot itself uses ``send_prompt_async`` (fire-and-forget) + status
         polling everywhere; this synchronous variant is part of the typed
         REST surface for external consumers who want blocking semantics.
 
-        `parts` is the opencode message-parts array, e.g.
-        ``[{"type": "text", "text": "..."}]``. `agent` selects an opencode agent
-        (e.g. ``"plan"`` for plan mode). Returns ``{ info, parts }``.
-
-        `model` overrides the agent's frontmatter model for this one call; when
-        ``model is None`` (the common case — callers don't pass it), it's
-        resolved from config via ``_resolve_model`` so the bot's
-        ``OPENCODE_DEFAULT_MODEL`` / ``OPENCODE_ASSISTANT_MODEL`` env vars
-        flow through transparently. The resolved ``"providerID/modelID"``
-        string is converted to the ``{"providerID", "modelID"}`` object the
-        opencode server expects (see ``_model_ref``); the ``model`` key is
-        omitted when no override is configured.
+        v2's ``POST /api/session/{id}/prompt`` only admits the input and
+        schedules the agent loop (it returns the admitted user inbox entry,
+        NOT the assistant reply), and its body takes ``{text, files, ...}``
+        — no ``agent``/``model``/``parts``. This method preserves the v1
+        sync signature by: switching the session agent/model when overrides
+        are given → sending the text of the first text part as the prompt →
+        blocking on ``/api/experimental/session/{id}/wait`` (204 when idle)
+        → returning the newest assistant message in the v1 ``{info, parts}``
+        shape. Only the first ``{"type": "text"}`` part's text is sent.
         """
-        body: dict = {"parts": parts}
-        if agent is not None:
-            body["agent"] = agent
+        text = next(
+            (p.get("text", "") for p in parts if isinstance(p, dict) and p.get("type") == "text"),
+            "",
+        )
+        if not text:
+            raise OpencodeError(
+                "send_message requires at least one {'type': 'text'} part "
+                "with non-empty text"
+            )
+        # Apply per-session agent/model overrides when configured.
+        if agent:
+            await self._request(
+                "POST", f"/api/session/{sid}/agent",
+                json={"agent": agent}, directory=directory,
+            )
         resolved_model = model if model is not None else self._resolve_model(agent)
         model_ref = self._model_ref(resolved_model)
         if model_ref is not None:
-            body["model"] = model_ref
-        return await self._request(
-            "POST", f"/session/{sid}/message", json=body, directory=directory
+            await self._request(
+                "POST", f"/api/session/{sid}/model",
+                json={"model": model_ref}, directory=directory,
+            )
+        await self.send_prompt_async(
+            sid, parts, directory=directory, _override_prompt_text=text
         )
+        await self.wait_session_idle(sid)
+        # The newest assistant message is the turn's reply.
+        messages = await self.list_messages(sid, directory=directory)
+        for entry in reversed(messages):
+            if isinstance(entry.get("info"), dict) and entry["info"].get("role") == "assistant":
+                return entry
+        return {}
 
     async def send_prompt_async(
             self,
@@ -417,104 +670,204 @@ class OpencodeClient:
             model: str | None = None,
             *,
             directory: str | None = None,
+            _override_prompt_text: str | None = None,
     ) -> None:
-        """POST /session/{id}/prompt_async — fire-and-forget (204 No Content).
+        """POST /api/session/{id}/prompt — admit the input, schedule the loop.
 
-        Pair with `stream_events` to observe progress and the final result
-        (the Discord bot uses `get_session_status` polling instead — see
-        `opencode_discord_bot.events.poll_until_idle`).
+        v2 has no separate ``prompt_async``; the single ``prompt`` endpoint
+        always schedules asynchronously and returns immediately with the
+        admitted user inbox entry. Pair with `get_session_status` polling
+        (see `opencode_discord_bot.events.poll_until_idle`) to observe
+        progress and the final result.
 
-        `model` overrides the agent's frontmatter model for this one call; when
-        ``model is None`` (the common case — callers don't pass it), it's
-        resolved from config via ``_resolve_model`` so the bot's
+        `agent` / `model` override the session's agent/model for subsequent
+        turns (v2 semantics: per-session via ``/api/session/{id}/agent`` +
+        ``/model``). When ``model is None`` (the common case), it's resolved
+        from config via ``_resolve_model`` so the bot's
         ``OPENCODE_DEFAULT_MODEL`` / ``OPENCODE_ASSISTANT_MODEL`` env vars
-        flow through transparently. The resolved ``"providerID/modelID"``
-        string is converted to the ``{"providerID", "modelID"}`` object the
-        opencode server expects (see ``_model_ref``); the ``model`` key is
-        omitted when no override is configured.
+        flow through transparently; no request is made when both the
+        explicit and resolved values are empty (the session's own default
+        wins).
         """
-        body: dict = {"parts": parts}
-        if agent is not None:
-            body["agent"] = agent
+        # Per-session agent/model switch (only when an override applies —
+        # otherwise the session's own default wins, matching v1 behavior).
+        if agent:
+            await self._request(
+                "POST", f"/api/session/{sid}/agent",
+                json={"agent": agent}, directory=directory,
+            )
         resolved_model = model if model is not None else self._resolve_model(agent)
         model_ref = self._model_ref(resolved_model)
         if model_ref is not None:
-            body["model"] = model_ref
+            await self._request(
+                "POST", f"/api/session/{sid}/model",
+                json={"model": model_ref}, directory=directory,
+            )
+        text = _override_prompt_text or next(
+            (
+                p.get("text", "")
+                for p in parts
+                if isinstance(p, dict) and p.get("type") == "text"
+            ),
+            "",
+        )
+        if not text:
+            raise OpencodeError(
+                "send_prompt_async requires at least one {'type': 'text'} "
+                "part with non-empty text"
+            )
         await self._request(
-            "POST", f"/session/{sid}/prompt_async", json=body, directory=directory
+            "POST", f"/api/session/{sid}/prompt",
+            json={"text": text}, directory=directory,
         )
 
-    # --- questions ---
+    async def wait_session_idle(
+            self, sid: str, *, timeout: float = 1800.0
+    ) -> None:
+        """POST /api/experimental/session/{id}/wait — block until idle (204).
+
+        Server-side blocking wait for the session's agent loop to go idle
+        (the v2 replacement for client-side ``poll_until_idle`` loops).
+        httpx's read timeout (60s) applies; the bot's polling loop
+        (`poll_until_idle`) remains the primary idle signal — this is for
+        external consumers who want blocking semantics.
+        """
+        await self._request(
+            "POST", f"/api/experimental/session/{sid}/wait", timeout=timeout
+        )
+
+    # --- questions (v2 forms, projected to the v1 question shape) ---
 
     async def list_questions(
             self, *, directory: str | None = None
     ) -> list[dict]:
-        """GET /question — all pending question requests across sessions.
+        """GET /api/form — pending forms, projected to the v1 question shape.
 
-        Each entry is a ``Request`` (``{ id, sessionID, questions: Info[], tool? }``)
-        per ``packages/schema/src/v1/question.ts``. The bot filters by
-        ``sessionID`` to surface only those for the session it's driving.
+        v2 replaced the v1 ``question`` API with **forms**; each
+        ``Form.Info`` (``{id, sessionID, title, fields}``) is projected into
+        the v1 request shape (``{id, sessionID, questions: [{question,
+        options, multiple}]}``, one entry per form field) so the bot's
+        button UI + the monitor's ``question_block`` render unchanged. The
+        raw v2 ``Form.Info`` is preserved under ``_v2_form`` for callers
+        that need the fields directly. The bot filters by ``sessionID`` to
+        surface only those for the session it's driving.
 
-        ``directory`` routes the request to that project instance (the
-        pending-question map is instance-scoped on multi-instance servers).
+        ``directory`` routes the request to that project instance.
         """
-        result = await self._request("GET", "/question", directory=directory)
-        return result if isinstance(result, list) else []
+        kw: dict[str, Any] = {}
+        if directory is not None:
+            kw["params"] = {"location[directory]": directory}
+        result = await self._request("GET", "/api/form", **kw)
+        data = _unwrap_envelope(result)
+        out: list[dict] = []
+        for entry in data if isinstance(data, list) else []:
+            if isinstance(entry, dict):
+                out.append(_project_form_to_v1_question(entry))
+        return out
 
     async def reply_question(self, request_id: str, answers: list[list[str]]) -> bool:
-        """POST /question/:id/reply — answers in question order.
+        """POST /api/session/{id}/form/{formID}/reply — answer a pending form.
 
-        ``answers`` is one array of selected labels per question, in order.
-        Resolves the deferred the ``question`` tool is awaiting, so the agent
-        turn resumes. Returns ``True`` on success.
+        Resolves the form from the pending list by id, then submits the
+        answer (the v1 ``answers`` list[list[str]] is reverse-mapped to the
+        v2 ``Form.Value`` — the first selection of the first array, or the
+        full array for multiselect fields). Resolves the deferred the
+        agent's form is awaiting, so the agent turn resumes. Returns
+        ``True`` on success (204).
         """
-        return bool(
-            await self._request(
-                "POST", f"/question/{request_id}/reply", json={"answers": answers}
-            )
-        )
+        for req in await self.list_questions():
+            if req.get("id") == request_id:
+                v2_form = req.get("_v2_form") or req
+                sid = v2_form.get("sessionID") or req.get("sessionID")
+                fid = v2_form.get("id") or request_id
+                answer = _project_v1_question_to_v2(v2_form, answers)
+                await self._request(
+                    "POST",
+                    f"/api/session/{sid}/form/{fid}/reply",
+                    json={"answer": answer},
+                )
+                return True
+        _log.warning("form %s not in pending list; cannot reply", request_id)
+        return False
 
     async def reject_question(self, request_id: str) -> bool:
-        """POST /question/:id/reject — fails the deferred with RejectedError.
+        """DELETE /api/session/{id}/form/{formID} — cancel a pending form.
 
-        The ``question`` tool returns "user dismissed" to the agent. Used on
-        session timeout/abort for surfaced-but-unanswered requests so the agent
-        gets a clean dismissal instead of parking until server restart.
+        v2's replacement for the v1 question reject: the form's deferred
+        resolves "cancelled" instead of parking until server restart. Used
+        on session timeout/abort for surfaced-but-unanswered requests so the
+        agent gets a clean dismissal.
         """
-        return bool(await self._request("POST", f"/question/{request_id}/reject"))
+        for req in await self.list_questions():
+            if req.get("id") == request_id:
+                v2_form = req.get("_v2_form") or req
+                sid = v2_form.get("sessionID") or req.get("sessionID")
+                fid = v2_form.get("id") or request_id
+                if not sid or not fid:
+                    return False
+                await self._request("DELETE", f"/api/session/{sid}/form/{fid}")
+                return True
+        _log.warning("form %s not in pending list; cannot cancel", request_id)
+        return False
 
     # --- permissions ---
 
     async def list_permissions(
             self, *, directory: str | None = None
     ) -> list[dict]:
-        """GET /permission — all pending permission requests across sessions.
+        """GET /api/permission/request — pending permission requests.
 
-        Each entry is a ``Request`` (``{ id, sessionID, permission, patterns,
-        metadata, always, tool? }``) per
-        ``packages/schema/src/v1/permission.ts``.
+        Each entry is a v2 ``Permission.Request``
+        (``{id, sessionID, action, resources, ...}``). The v1 shape also had
+        a human ``permission`` name; v2's ``action`` is projected onto it so
+        the button UI / monitor render unchanged.
 
-        ``directory`` routes the request to that project instance (the
-        pending-permission map is instance-scoped on multi-instance servers).
+        ``directory`` routes the request to that project instance.
         """
-        result = await self._request("GET", "/permission", directory=directory)
-        return result if isinstance(result, list) else []
+        kw: dict[str, Any] = {}
+        if directory is not None:
+            kw["params"] = {"location[directory]": directory}
+        result = await self._request("GET", "/api/permission/request", **kw)
+        data = _unwrap_envelope(result)
+        out: list[dict] = []
+        for entry in data if isinstance(data, list) else []:
+            if isinstance(entry, dict):
+                projected = dict(entry)
+                # v1 renderers read ``permission``; v2 calls it ``action``.
+                projected.setdefault("permission", entry.get("action"))
+                projected.setdefault("patterns", entry.get("resources") or [])
+                out.append(projected)
+        return out
 
     async def reply_permission(
             self, request_id: str, reply: str, message: str | None = None
     ) -> bool:
-        """POST /permission/:id/reply — approve/deny a permission request.
+        """POST /api/session/{id}/permission/{requestID}/reply — approve/deny.
 
-        ``reply`` is one of ``"once"`` | ``"always"`` | ``"reject"``. ``"always"``
-        persists an allow-rule on the opencode server (survives restarts);
-        ``"reject"`` fails the tool. Returns ``True`` on success.
+        ``reply`` is one of ``"once"`` | ``"always"`` | ``"reject"`` (the
+        same values as v1 — v2 renamed the field to ``decision``).
+        ``"always"`` persists an allow-rule on the opencode server (survives
+        restarts); ``"reject"`` fails the tool. The owning session is
+        resolved from the pending list. Returns ``True`` on success (204).
         """
-        body: dict = {"reply": reply}
-        if message is not None:
-            body["message"] = message
-        return bool(
-            await self._request("POST", f"/permission/{request_id}/reply", json=body)
+        for req in await self.list_permissions():
+            if req.get("id") == request_id:
+                sid = req.get("sessionID")
+                if not sid:
+                    return False
+                body: dict = {"decision": reply}
+                if message is not None:
+                    body["message"] = message
+                await self._request(
+                    "POST",
+                    f"/api/session/{sid}/permission/{request_id}/reply",
+                    json=body,
+                )
+                return True
+        _log.warning(
+            "permission request %s not in pending list; cannot reply", request_id
         )
+        return False
 
     # --- agents ---
     # Not used by the bot itself (the bot never enumerates opencode agents);
@@ -523,42 +876,41 @@ class OpencodeClient:
     async def list_agents(
             self, *, directory: str | None = None
     ) -> list[dict]:
-        """GET /agent — all available agents (default + plan + custom)."""
-        result = await self._request("GET", "/agent", directory=directory)
-        return result if isinstance(result, list) else []
+        """GET /api/agent — all available agents (``{"location", "data"}``)."""
+        kw: dict[str, Any] = {}
+        if directory is not None:
+            kw["params"] = {"location[directory]": directory}
+        result = await self._request("GET", "/api/agent", **kw)
+        data = _unwrap_envelope(result)
+        return data if isinstance(data, list) else []
 
     # --- events (SSE) ---
 
     async def stream_events(self) -> AsyncGenerator[dict, None]:
-        """GET /event — Server-Sent Events stream (global, all sessions).
+        """GET /api/event — Server-Sent Events stream (global, all sessions).
 
-        Yields parsed event dicts ``{"type": ..., "properties": {...}}``. The
-        first event is ``server.connected``, then bus events such as
-        ``session.updated`` and ``message.updated``.
+        Yields parsed event dicts in the v1 consumer shape
+        ``{"type": ..., "properties": {...}}``: the v2 SSE ``data:`` frame is
+        JSON ``{"id", "type", "data"}`` where ``type`` is the semantic type
+        (``message.part.delta``, ``session.status``, ``permission.asked``,
+        ``form.created``, ...) and ``data`` is the properties payload;
+        heartbeat comment frames produce no yield.
 
         This is a streaming generator over a single long-lived HTTP connection
-        — it is NOT retried. The caller owns the reconnect/backoff loop. Raises `OpencodeError` if the connection fails to
-        establish; `httpx.RemoteProtocolError` / `httpx.ReadError` surface to
-        the caller if the stream drops mid-iteration.
+        — it is NOT retried. The caller owns the reconnect/backoff loop.
+        Raises `OpencodeError` if the connection fails to establish;
+        `httpx.RemoteProtocolError` / `httpx.ReadError` surface to the caller
+        if the stream drops mid-iteration.
 
-        .. deprecated::
-            The v1 ``{type, properties}`` parser here is known-stale against
-            opencode's v2 SSE wire format (``{id, type, data}`` with the event
-            type in the JSON body, not the SSE ``event:`` line, which is
-            always ``"message"``). On v2 servers the parser silently skips
-            every event, so the idle signal is never observed and a consumer
-            relying on this for completion would hang forever. The Discord
-            bot abandoned SSE for this reason and polls
-            ``get_session_status`` via ``events.poll_until_idle`` instead
-            (see ``events.py:7-15``). This method is retained only for
-            external consumers and should NOT be relied on for idle
-            detection; use ``poll_until_idle`` as the authoritative path.
-            A v2 parser rewrite is out of scope until a real consumer needs it.
+        The Discord bot does NOT use this stream — it polls
+        ``get_session_status`` via ``events.poll_until_idle`` as the
+        authoritative idle signal (SSE is opportunistically parsed here for
+        external consumers only).
         """
         client = await self._ac()
         async with client.stream(
                 "GET",
-                "/event",
+                "/api/event",
                 headers={"Accept": "text/event-stream"},
                 # The client's default read timeout (60s) would kill a long-lived
                 # SSE stream mid-iteration. Override per-request so the stream
@@ -566,30 +918,46 @@ class OpencodeClient:
                 timeout=None,
         ) as r:
             if r.status_code >= 400:
-                raise OpencodeError(f"GET /event -> {r.status_code}: {r.text[:500]}")
-            event_type: str | None = None
+                raise OpencodeError(
+                    f"GET /api/event -> {r.status_code}: {r.text[:500]}"
+                )
             data_lines: list[str] = []
             async for line in r.aiter_lines():
                 if line == "":
                     # blank line = end of event
-                    if event_type is not None and data_lines:
+                    if data_lines:
                         try:
                             payload = json.loads("\n".join(data_lines))
                         except json.JSONDecodeError:
                             payload = {"raw": "\n".join(data_lines)}
-                        yield {"type": event_type, "properties": payload}
-                    event_type = None
+                        # v2 frames: {id, type, data}; project to the v1
+                        # consumer shape {type, properties}.
+                        yield {
+                            "type": payload.get("type", "unknown")
+                            if isinstance(payload, dict)
+                            else "unknown",
+                            "properties": payload.get("data", payload)
+                            if isinstance(payload, dict)
+                            else payload,
+                        }
                     data_lines = []
                     continue
-                if line.startswith("event:"):
-                    event_type = line[len("event:"):].strip()
-                elif line.startswith("data:"):
+                if line.startswith("data:"):
                     data_lines.append(line[len("data:"):].lstrip())
-                # ignore comment lines (:) and unknown fields
+                # v2 sets no `event:` line (the semantic type is inside the
+                # JSON body); comment lines (`: heartbeat`) and unknown
+                # fields are ignored.
             # flush a trailing event if the stream ended without a blank line
-            if event_type is not None and data_lines:
+            if data_lines:
                 try:
                     payload = json.loads("\n".join(data_lines))
                 except json.JSONDecodeError:
                     payload = {"raw": "\n".join(data_lines)}
-                yield {"type": event_type, "properties": payload}
+                yield {
+                    "type": payload.get("type", "unknown")
+                    if isinstance(payload, dict)
+                    else "unknown",
+                    "properties": payload.get("data", payload)
+                    if isinstance(payload, dict)
+                    else payload,
+                }
